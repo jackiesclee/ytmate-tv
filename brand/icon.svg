@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#6D28D9"/>
+      <stop offset="0.55" stop-color="#DB2777"/>
+      <stop offset="1" stop-color="#F97316"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.3" cy="0.2" r="0.8">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.35"/>
+      <stop offset="0.6" stop-color="#ffffff" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="play" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#FFE4F1"/>
+    </linearGradient>
+    <filter id="sh" x="-30%" y="-30%" width="160%" height="160%">
+      <feDropShadow dx="0" dy="10" stdDeviation="14" flood-color="#3b0764" flood-opacity="0.45"/>
+    </filter>
+  </defs>
+  <rect width="512" height="512" rx="112" fill="url(#bg)"/>
+  <rect width="512" height="512" rx="112" fill="url(#glow)"/>
+  <!-- sound waves -->
+  <g fill="none" stroke="#ffffff" stroke-linecap="round" filter="url(#sh)">
+    <path d="M338 176 A110 110 0 0 1 338 336" stroke-width="26" stroke-opacity="0.95"/>
+    <path d="M382 130 A170 170 0 0 1 382 382" stroke-width="22" stroke-opacity="0.55"/>
+  </g>
+  <!-- play triangle (rounded) -->
+  <path filter="url(#sh)" fill="url(#play)"
+        d="M150 150 C150 128 172 116 191 127 L316 222 C333 235 333 277 316 290 L191 385 C172 396 150 384 150 362 Z"/>
+  <!-- music note cut into the play -->
+  <g fill="#DB2777">
+    <rect x="214" y="206" width="18" height="86" rx="8"/>
+    <path d="M222 203 L264 191 C271 189 276 194 276 201 L276 219 L230 232 Z"/>
+    <ellipse cx="206" cy="295" rx="26" ry="20" transform="rotate(-18 206 295)"/>
+  </g>
+</svg>

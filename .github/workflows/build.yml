@@ -1,0 +1,88 @@
+# YTmate TV：每次推送到 main（或在 Actions 頁面手動按 Run workflow）自動編譯 APK，
+# 完成後在「Releases」與這次執行的「Artifacts」都可以下載 YTmateTV-v1.0.N.apk。
+#
+# 簽章（之後更新 App 都必須用同一把，才能直接覆蓋安裝）：
+#   優先用 repo Secrets：YTMATE_KEYSTORE_BASE64、YTMATE_KEYSTORE_PASSWORD、YTMATE_KEY_ALIAS、YTMATE_KEY_PASSWORD
+#   沒有 Secrets 時，改用 repo 裡的 keystore/release.jks＋keystore/keystore.properties（只適合私人 repo）
+#   兩者都沒有 → 用除錯簽章（每次編譯都不同，更新時要先移除舊版）
+name: Build APK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
+
+      - name: 準備簽章金鑰
+        env:
+          KS_B64: ${{ secrets.YTMATE_KEYSTORE_BASE64 }}
+          KS_PW: ${{ secrets.YTMATE_KEYSTORE_PASSWORD }}
+          KS_ALIAS: ${{ secrets.YTMATE_KEY_ALIAS }}
+          KS_KEYPW: ${{ secrets.YTMATE_KEY_PASSWORD }}
+        run: |
+          if [ -n "$KS_B64" ]; then
+            echo "$KS_B64" | base64 -d > "$RUNNER_TEMP/release.jks"
+            {
+              echo "YTMATE_KEYSTORE=$RUNNER_TEMP/release.jks"
+              echo "YTMATE_KEYSTORE_PASSWORD=$KS_PW"
+              echo "YTMATE_KEY_ALIAS=$KS_ALIAS"
+              echo "YTMATE_KEY_PASSWORD=$KS_KEYPW"
+            } >> "$GITHUB_ENV"
+            echo "使用 Secrets 的正式簽章"
+          elif [ -f keystore/release.jks ] && [ -f keystore/keystore.properties ]; then
+            set -a; . keystore/keystore.properties; set +a
+            {
+              echo "YTMATE_KEYSTORE=$GITHUB_WORKSPACE/keystore/release.jks"
+              echo "YTMATE_KEYSTORE_PASSWORD=$KEYSTORE_PASSWORD"
+              echo "YTMATE_KEY_ALIAS=$KEY_ALIAS"
+              echo "YTMATE_KEY_PASSWORD=$KEY_PASSWORD"
+            } >> "$GITHUB_ENV"
+            echo "使用 repo 內的正式簽章"
+          else
+            echo "::warning::沒有正式簽章，改用除錯簽章（更新 App 時需先移除舊版）"
+          fi
+
+      - name: 編譯 APK
+        run: gradle :app:assembleRelease --no-daemon --stacktrace
+
+      - name: 整理檔名
+        id: apk
+        run: |
+          V="1.0.${GITHUB_RUN_NUMBER}"
+          mkdir -p out
+          cp app/build/outputs/apk/release/app-release.apk "out/YTmateTV-v${V}.apk"
+          echo "version=${V}" >> "$GITHUB_OUTPUT"
+          ls -la out
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: YTmateTV-v${{ steps.apk.outputs.version }}
+          path: out/*.apk
+
+      - name: 建立 Release（方便下載）
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.apk.outputs.version }}
+          name: YTmate TV v${{ steps.apk.outputs.version }}
+          files: out/*.apk
+          body: |
+            YTmate TV（小米電視／Android TV）
+            安裝：把 APK 用 USB 隨身碟拷到電視，用「檔案管理」開啟安裝（第一次需允許「安裝未知來源應用」）。
