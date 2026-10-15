@@ -36,7 +36,7 @@ CHANNELS = [{"id": "fmt", "name": "🎬 格式測試", "description": "H.264／A
 SONGS = [
     {"video_id": "h264", "title": "H.264 原檔影片", "codec": "h264", "file": "h264.mp4"},
     {"video_id": "av1", "title": "AV1 原檔影片（伺服器已知格式）", "codec": "av1", "file": "av1.mp4"},
-    {"video_id": "av1_unknown", "title": "AV1 原檔影片（伺服器還不知道格式）", "codec": None, "file": "av1.mp4"},
+    {"video_id": "av1_unknown", "title": "AV1 原檔影片（伺服器還不知道格式）", "codec": None, "file": "av1b.mp4"},
     {"video_id": "music", "title": "純音樂", "codec": None, "file": None},
 ]
 

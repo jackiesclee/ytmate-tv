@@ -145,13 +145,23 @@ class PlayerActivity : Activity() {
                 if (cur.kind == "audio") return
                 var hasVideo = false
                 var videoOk = false
+                var mime = ""
                 for (g in tracks.groups) {
                     if (g.type == C.TRACK_TYPE_VIDEO) {
                         hasVideo = true
-                        if (g.isSupported) videoOk = true
+                        if (g.length > 0) mime = g.getTrackFormat(0).sampleMimeType ?: ""
+                        // allowExceedsCapabilities=true：解碼器存在、只是宣告的規格（profile／level）較保守時照樣播放
+                        // （Android 7 的軟體解碼器常這樣，實際上播得動）；真的播不了會走 onPlayerError 換版本。
+                        // 只有「完全沒有這種格式的解碼器」（例如舊電視遇到 AV1）才在這裡直接換。
+                        if (g.isSupported(true)) videoOk = true
                     }
                 }
-                Log.i(TAG, "tracks item=$i src=${cur.kind} codec=${cur.codec} hasVideo=$hasVideo videoOk=$videoOk")
+                // 換版本後，播放器可能還會再回報一次「上一個版本」的影像軌：格式對不上目前版本就忽略
+                if (hasVideo && cur.codec.isNotEmpty() && mime.isNotEmpty() && !mimeMatches(cur.codec, mime)) {
+                    Log.i(TAG, "tracks item=$i stale mime=$mime (src=${cur.kind}/${cur.codec}) ignored")
+                    return
+                }
+                Log.i(TAG, "tracks item=$i src=${cur.kind} codec=${cur.codec} mime=$mime hasVideo=$hasVideo videoOk=$videoOk")
                 if (hasVideo && !videoOk) fallback(i, "這台電視解不了原檔畫面，改用相容版本")
             }
 
@@ -199,6 +209,17 @@ class PlayerActivity : Activity() {
         }
         Log.i(TAG, "item=$i use src=${src.kind} codec=${src.codec} url=${src.url}")
         return b.build()
+    }
+
+    private fun mimeMatches(codec: String, mime: String): Boolean {
+        val m = mime.lowercase()
+        return when (codec) {
+            "h264" -> m.contains("avc")
+            "hevc" -> m.contains("hevc")
+            "vp9" -> m.contains("vp9")
+            "av1" -> m.contains("av01") || m.contains("av1")
+            else -> true
+        }
     }
 
     /** 換成這支影片的下一個版本，從同一個時間點繼續播。 */

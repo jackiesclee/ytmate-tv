@@ -143,18 +143,18 @@ class Page:
         return json.loads(v) if v else {}
 
 
+# 測試影片的底色（e2e/media/）：H.264 原檔藍、AV1 原檔紅、480p 相容版綠
+REF = {"blue": (29, 78, 216), "red": (185, 28, 28), "green": (21, 128, 61)}
+
+
 def color_at(png, fx=0.15, fy=0.45):
-    """取畫面某一點的主色：blue（H.264 原檔）／red（AV1 原檔）／green（480p 相容版）／dark（沒有畫面）。"""
+    """取畫面某一點的顏色，跟三支測試影片的底色比對；都不像（例如音樂封面、黑畫面）就回傳 other。"""
     im = Image.open(png).convert("RGB")
     w, h = im.size
     pts = [(int(w * fx + dx), int(h * fy + dy)) for dx in (-10, 0, 10) for dy in (-10, 0, 10)]
-    r = sum(im.getpixel(p)[0] for p in pts) / 9
-    g = sum(im.getpixel(p)[1] for p in pts) / 9
-    b = sum(im.getpixel(p)[2] for p in pts) / 9
-    if max(r, g, b) < 25:
-        return "dark", (int(r), int(g), int(b))
-    top = max((r, "red"), (g, "green"), (b, "blue"))[1]
-    return top, (int(r), int(g), int(b))
+    c = tuple(sum(im.getpixel(p)[k] for p in pts) / 9 for k in range(3))
+    name, dist = min(((n, sum((a - b) ** 2 for a, b in zip(c, ref)) ** 0.5) for n, ref in REF.items()), key=lambda x: x[1])
+    return (name if dist < 70 else "other"), tuple(int(x) for x in c)
 
 
 def main():
@@ -254,8 +254,10 @@ def main():
         key("KEYCODE_ENTER", 1, 1)
         top = wait_for(lambda: "PlayerActivity" in resumed(), 15, 1)
         check(f"[{label}] 開啟原生播放器", top)
-        time.sleep(14 if fallback else 9)
+        time.sleep(14 if fallback else 9)          # 控制列 3.5 秒後自動隱藏，截圖時畫面不會被蓋住
         lc = logcat()
+        with open(os.path.join(args.out, f"{args.label}_play_{label}_logcat.txt"), "w", encoding="utf-8") as f:
+            f.write(lc)
         reqs = [x for x in srvlog()[n0:] if x["kind"] in ("file", "file_denied")]
         names = [x["name"] for x in reqs if x["kind"] == "file"]
         check(f"[{label}] 媒體檔請求都有帶登入 cookie", reqs and not [x for x in reqs if x["kind"] == "file_denied"], names)
@@ -272,7 +274,9 @@ def main():
         for f in forbid_files:
             check(f"[{label}] 沒有去下載 {f}（省流量）", f not in names, names)
         if fallback:
-            check(f"[{label}] App 偵測到畫面解不了 → 自動改用 480p", "fallback" in lc and "-> low" in lc, lc[-300:])
+            fb = [l.split("YTmateTV:")[-1].strip() for l in lc.splitlines() if f"item={idx}" in l and ("fallback" in l or "tracks" in l)]
+            check(f"[{label}] App 偵測到畫面解不了 → 自動改用 480p（而且沒有再誤判掉到純聲音）",
+                  any("-> low" in l for l in fb) and not any("-> audio" in l for l in fb), " / ".join(fb)[:380])
         p = shot(f"06_play_{label}")
         if expect_color:
             col, rgb = color_at(p)
@@ -289,7 +293,7 @@ def main():
         play_case(1, "av1_known", "original", None, ["av1.mp4"])
     else:
         play_case(1, "av1_known", "low", "green", ["low.mp4"], forbid_files=["av1.mp4"])
-        play_case(2, "av1_unknown", "low", "green", ["av1.mp4", "low.mp4"], fallback=True)
+        play_case(2, "av1_unknown", "low", "green", ["av1b.mp4", "low.mp4"], fallback=True)
     play_case(3, "music", "audio", None, ["audio.mp3"])
 
     # ⑧ 返回鍵：頻道頁 → 首頁 → 連按兩次離開
