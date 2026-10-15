@@ -268,7 +268,8 @@ def controller_cases(pg):
     time.sleep(13)
     adb("logcat", "-c")
     leave_player()
-    saved = player_log(r"resume save vid=h264 pos=(\d+)")
+    # 播放器的 onStop（存位置）在頻道頁回到前景之後才執行：等一下再讀紀錄
+    saved = wait_for(lambda: player_log(r"resume save vid=h264 pos=(\d+)"), 8, 0.5)
     check("[續播] 看到一半離開 → 記住位置", saved, saved)
     adb("logcat", "-c")
     open_card(0)
