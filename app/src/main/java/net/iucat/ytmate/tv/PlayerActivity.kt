@@ -37,7 +37,10 @@ import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
+import androidx.media3.datasource.DataSourceBitmapLoader
 import androidx.media3.session.MediaSession
+import com.google.common.util.concurrent.MoreExecutors
+import java.util.concurrent.Executors
 import androidx.media3.ui.PlayerView
 import org.json.JSONObject
 import java.net.HttpURLConnection
@@ -176,7 +179,10 @@ class PlayerActivity : Activity() {
         view.player = player
         // 媒體工作階段：系統媒體鍵／藍牙遙控器／語音控制都送到這個播放器（Android TV 品質檢查表要求）
         try {
-            session = MediaSession.Builder(this, player).setId("ytmate-${SystemClock.uptimeMillis()}").build()
+            // 縮圖也要登入：系統「正在播放」卡片的封面用同一個帶 cookie 的連線下載
+            session = MediaSession.Builder(this, player).setId("ytmate-${SystemClock.uptimeMillis()}")
+                .setBitmapLoader(DataSourceBitmapLoader(MoreExecutors.listeningDecorator(Executors.newSingleThreadExecutor()), dataSource))
+                .build()
         } catch (e: Exception) {
             Log.w(TAG, "media session failed: $e")
         }

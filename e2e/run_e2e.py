@@ -190,6 +190,12 @@ def player_log(pat):
     return [l.split("YTmateTV:")[-1].strip() for l in logcat().splitlines() if re.search(pat, l)]
 
 
+def idle(pg):
+    """從播放器回來後頁面會重新整理頻道：等它完成再選卡片（不然選好的焦點會被重新整理蓋掉）。"""
+    time.sleep(0.5)
+    wait_for(lambda: not pg.state().get("busy"), 10, 0.5)
+
+
 def controller_cases(pg):
     """使用者回報：在小米電視上用控制列按「下一支」→ 下一支開始播了，但控制列一直不收起來，要按返回才會收。
     這裡完全照著遙控器操作重現，並檢查各種情況下控制列都會自動收起。
@@ -197,6 +203,7 @@ def controller_cases(pg):
     for k in ("animator_duration_scale", "transition_animation_scale", "window_animation_scale"):
         sh("settings", "put", "global", k, "1")
     adb("logcat", "-c")
+    idle(pg)
     pg.ev("setFocus(document.querySelector('.grid.songs .card[data-i=\"0\"]'))")
     key("KEYCODE_ENTER", 1, 1)
     top = wait_for(lambda: "PlayerActivity" in resumed(), 15, 1)
@@ -241,6 +248,7 @@ def controller_cases(pg):
 
     # 長影片記住看到哪裡（測試版門檻 20 秒；正式版 5 分鐘以上的影片）
     def open_card(i):
+        idle(pg)
         pg.ev(f"setFocus(document.querySelector('.grid.songs .card[data-i=\"{i}\"]'))")
         key("KEYCODE_ENTER", 1, 1)
         return wait_for(lambda: "PlayerActivity" in resumed(), 15, 1)
@@ -267,30 +275,6 @@ def controller_cases(pg):
     shot("09_resume")
     leave_player()
 
-    # 設定頁：畫質「480p 省流量」、字幕「中文優先」→ 記住 → 播放照新設定
-    key("KEYCODE_MENU", 1, 1.5)
-    labels = lambda: pg.ev("document.getElementById('qbtn').textContent + ' | ' + document.getElementById('sbtn').textContent")
-    check("[設定] 預設：畫質自動（最佳）、字幕英文優先", labels() == "畫質：自動（最佳） | 字幕：英文優先", labels())
-    pg.ev("setFocus(document.getElementById('qbtn'))")
-    key("KEYCODE_ENTER", 1, 1)
-    pg.ev("setFocus(document.getElementById('sbtn'))")
-    key("KEYCODE_ENTER", 1, 1)
-    check("[設定] 切換成 480p 省流量、中文字幕優先", labels() == "畫質：480p 省流量 | 字幕：中文優先", labels())
-    check("[設定] 設定存在 App 裡", pg.ev("YTmateTV.getPref('quality') + ',' + YTmateTV.getPref('subs')") == "low,zh")
-    n0 = len(srvlog())
-    key("KEYCODE_BACK", 1, 2.5)
-    chq = [x for x in srvlog()[n0:] if x["kind"] == "channel"]
-    check("[設定] 關閉設定 → 頻道用 480p 重新排播放順序（q=low）", chq and chq[-1].get("q") == "low", chq[-1:] if chq else "")
-    badge = pg.ev("document.querySelector('.grid.songs .card[data-i=\"0\"]').innerText")
-    check("[設定] H.264 影片卡片改標 480p", "480p" in (badge or ""), badge)
-    play_case(0, "h264_pref_low", "low", "green", ["low.mp4", "zh.vtt"], forbid_files=["h264.mp4"], expect_sub="zh")
-    # 在播放器字幕選單以外的方式關字幕：設定頁再按兩下（中文 → 關閉 → 英文），回到預設；畫質保留 480p（測試重開 App 後仍記得）
-    key("KEYCODE_MENU", 1, 1.5)
-    pg.ev("setFocus(document.getElementById('sbtn'))")
-    key("KEYCODE_ENTER", 1, 1)
-    check("[設定] 字幕可以關閉", "字幕：關閉" in labels(), labels())
-    key("KEYCODE_ENTER", 1, 1)
-    key("KEYCODE_BACK", 1, 2)
     for k in ("animator_duration_scale", "transition_animation_scale", "window_animation_scale"):
         sh("settings", "put", "global", k, "0")
 
@@ -392,6 +376,7 @@ def main():
     def play_case(idx, label, expect_kind, expect_color, expect_files, forbid_files=(), fallback=False, expect_sub=None):
         adb("logcat", "-c")
         n0 = len(srvlog())
+        idle(pg)
         pg.ev(f"setFocus(document.querySelector('.grid.songs .card[data-i=\"{idx}\"]'))")
         key("KEYCODE_ENTER", 1, 1)
         top = wait_for(lambda: "PlayerActivity" in resumed(), 15, 1)
@@ -441,6 +426,31 @@ def main():
         play_case(2, "av1_unknown", "low", "green", ["av1b.mp4", "low.mp4"], fallback=True)
     play_case(3, "music", "audio", None, ["audio.mp3"])
     controller_cases(pg)
+    # 設定頁：畫質「480p 省流量」、字幕「中文優先」→ 記住 → 播放照新設定
+    key("KEYCODE_MENU", 1, 1.5)
+    labels = lambda: pg.ev("document.getElementById('qbtn').textContent + ' | ' + document.getElementById('sbtn').textContent")
+    check("[設定] 預設：畫質自動（最佳）、字幕英文優先", labels() == "畫質：自動（最佳） | 字幕：英文優先", labels())
+    pg.ev("setFocus(document.getElementById('qbtn'))")
+    key("KEYCODE_ENTER", 1, 1)
+    pg.ev("setFocus(document.getElementById('sbtn'))")
+    key("KEYCODE_ENTER", 1, 1)
+    check("[設定] 切換成 480p 省流量、中文字幕優先", labels() == "畫質：480p 省流量 | 字幕：中文優先", labels())
+    check("[設定] 設定存在 App 裡", pg.ev("YTmateTV.getPref('quality') + ',' + YTmateTV.getPref('subs')") == "low,zh")
+    n0 = len(srvlog())
+    key("KEYCODE_BACK", 1, 2.5)
+    idle(pg)
+    chq = [x for x in srvlog()[n0:] if x["kind"] == "channel"]
+    check("[設定] 關閉設定 → 頻道用 480p 重新排播放順序（q=low）", chq and chq[-1].get("q") == "low", chq[-1:] if chq else "")
+    badge = pg.ev("document.querySelector('.grid.songs .card[data-i=\"0\"]').innerText")
+    check("[設定] H.264 影片卡片改標 480p", "480p" in (badge or ""), badge)
+    play_case(0, "h264_pref_low", "low", "green", ["low.mp4", "zh.vtt"], forbid_files=["h264.mp4"], expect_sub="zh")
+    # 在播放器字幕選單以外的方式關字幕：設定頁再按兩下（中文 → 關閉 → 英文），回到預設；畫質保留 480p（測試重開 App 後仍記得）
+    key("KEYCODE_MENU", 1, 1.5)
+    pg.ev("setFocus(document.getElementById('sbtn'))")
+    key("KEYCODE_ENTER", 1, 1)
+    check("[設定] 字幕可以關閉", "字幕：關閉" in labels(), labels())
+    key("KEYCODE_ENTER", 1, 1)
+    key("KEYCODE_BACK", 1, 2)
 
     # ⑧ 返回鍵：頻道頁 → 首頁 → 連按兩次離開
     key("KEYCODE_BACK", 1, 1.5)

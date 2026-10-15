@@ -246,12 +246,12 @@ window.tvMenu = function () {
 };
 // 從原生播放器回來時 App 會呼叫這個：重新整理頻道（480p 相容版可能剛轉好）、焦點停在最後播放的那一支
 window.tvAfterPlay = function (vid) {
-  if (S.view === 'channel' && S.channel && vid) openChannel(S.channel.id, vid, true);
+  if (S.view === 'channel' && S.channel && vid) { S.refreshing = true; openChannel(S.channel.id, vid, true); }
   return true;
 };
 // 給自動測試讀目前狀態（不影響使用）
 window.tvState = function () { return JSON.stringify({ view: S.view, focusAct: S.focusEl && S.focusEl.getAttribute('data-act'), focusId: S.focusEl && S.focusEl.getAttribute('data-id'),
-  focusI: S.focusEl && S.focusEl.getAttribute('data-i'), scrollTop: $('scroller').scrollTop, lite: document.documentElement.className.indexOf('lite') >= 0, decoders: DECODERS, chrome: CHROME }); };
+  focusI: S.focusEl && S.focusEl.getAttribute('data-i'), scrollTop: $('scroller').scrollTop, lite: document.documentElement.className.indexOf('lite') >= 0, decoders: DECODERS, chrome: CHROME, busy: !!S.refreshing }); };
 
 function activate(el) {
   if (!el) return;
@@ -334,7 +334,7 @@ function openChannel(id, focusVid, quiet) {
     var pa = document.querySelector('.btn[data-act="playall"]'), last = null;
     if (focusVid) { var cs = document.querySelectorAll('.grid.songs .card'); for (var q = 0; q < cs.length; q++) if (cs[q].getAttribute('data-vid') === focusVid) last = cs[q]; }
     setFocus(last || (playable.length ? pa : (document.querySelector('.grid .card') || pa)));
-  }).catch(function (e) { if (!quiet) toast('載入失敗：' + e.message); }).then(function () { $('loading').style.display = 'none'; });
+  }).catch(function (e) { if (!quiet) toast('載入失敗：' + e.message); }).then(function () { $('loading').style.display = 'none'; S.refreshing = false; });
 }
 
 // ══ 播放：App 裡交給原生播放器（每支附多個版本，畫面解不了會自動換下一個）；瀏覽器裡用備用播放器 ══
@@ -415,7 +415,7 @@ function prefLabels() { $('qbtn').textContent = Q_LABEL[getPref('quality')] || Q
 function closeSettings() {
   $('settings').className = 'fill'; setFocus(S.prevFocus || $('gear'), true);
   // 改了畫質而且正在頻道頁 → 重新載入這個頻道（套用新的播放順序），焦點留在原本那一支
-  if (S.prefChanged && S.view === 'channel' && S.channel) { var fv = S.focusEl && S.focusEl.getAttribute('data-vid'); openChannel(S.channel.id, fv, true); }
+  if (S.prefChanged && S.view === 'channel' && S.channel) { var fv = S.focusEl && S.focusEl.getAttribute('data-vid'); S.refreshing = true; openChannel(S.channel.id, fv, true); }
   S.prefChanged = false;
 }
 var unpairArmed = 0;
