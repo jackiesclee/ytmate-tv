@@ -211,12 +211,15 @@ def controller_cases(pg):
     ok = wait_for(ctl_hidden_now, 12, 0.5)
     check("[控制列] 開始播放後控制列自動收起", ok, " / ".join(ctl_lines())[-300:])
 
-    # 按「上」叫出控制列 → 焦點在播放／暫停 → 按「右」移到「下一支」
-    key("KEYCODE_DPAD_UP", 1, 1.2)
-    check("[控制列] 按「上」叫出控制列", ctl_shown_now(), " / ".join(ctl_lines())[-200:])
+    # 按「上」叫出控制列 → 焦點在播放／暫停 → 按「右」兩下移到「下一支」→ 按確認。
+    # 控制列 3.5 秒沒操作就會收起，模擬器每送一次 adb 指令要 1 秒左右，所以這幾個鍵用一次指令連續送出
     n_before = len(logcat().splitlines())
-    key("KEYCODE_DPAD_RIGHT", 2, 0.4)                       # 播放／暫停 → 快轉 → 下一支
-    key("KEYCODE_ENTER", 1, 0.5)                            # 馬上按下「下一支」（控制列 3.5 秒沒操作就會收起）
+    sh("input", "keyevent", "KEYCODE_DPAD_UP", "KEYCODE_DPAD_RIGHT", "KEYCODE_DPAD_RIGHT")
+    time.sleep(0.3)
+    sh("input", "keyevent", "KEYCODE_ENTER")              # 按下「下一支」
+    time.sleep(0.5)
+    keys = [l.split("YTmateTV:")[-1].strip() for l in logcat().splitlines()[n_before:] if "key KEYCODE" in l]
+    check("[控制列] 按「上」叫出控制列（之後的按鍵都在控制列上）", len(keys) >= 4 and all("shown=true" in k for k in keys[1:4]), keys)
     ent = [l.split("YTmateTV:")[-1].strip() for l in logcat().splitlines()[n_before:] if "key KEYCODE_ENTER" in l]
     check("[控制列] 焦點在「下一支」按鈕上按確認", ent and "focus=exo_next" in ent[0], ent)
     moved = wait_for(lambda: player_log(r"transition item=1"), 8, 0.5)
