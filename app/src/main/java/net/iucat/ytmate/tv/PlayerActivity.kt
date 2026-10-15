@@ -678,7 +678,10 @@ object Resume {
     /** 看了 10 秒以上、還沒看到最後 20 秒、而且影片夠長才記；否則清掉。 */
     fun save(ctx: Context, vid: String, pos: Long, dur: Long, minDur: Long) {
         if (vid.isEmpty()) return
-        if (dur < minDur || pos < 10_000L || pos > dur - 20_000L) { clear(ctx, vid); return }
+        if (dur < minDur || pos < 10_000L || pos > dur - 20_000L) {
+            Log.i(PlayerActivity.TAG, "resume skip vid=$vid pos=$pos dur=$dur")
+            clear(ctx, vid); return
+        }
         val sp = ctx.getSharedPreferences(FILE, Context.MODE_PRIVATE)
         val e = sp.edit().putString(vid, "$pos,${System.currentTimeMillis()}")
         val all = sp.all

@@ -260,8 +260,10 @@ def controller_cases(pg):
                 break
         return wait_for(lambda: "MainActivity" in resumed(), 10, 1)
 
+    adb("logcat", "-c")
     open_card(0)
     wait_for(lambda: player_log(r"playing=true"), 15, 0.5)
+    wait_for(ctl_hidden_now, 10, 0.5)             # 控制列收起後，左鍵才是「倒轉」
     key("KEYCODE_DPAD_LEFT", 4, 0.3)              # 先倒轉回開頭（這支前面可能已經記過位置），再看 13 秒
     time.sleep(13)
     adb("logcat", "-c")
