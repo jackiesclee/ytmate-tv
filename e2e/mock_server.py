@@ -41,9 +41,9 @@ SONGS = [
 ]
 
 
-def log(kind, **kw):
+def log(event, **kw):
     with LOCK:
-        LOG.append(dict(t=round(time.time(), 2), kind=kind, **kw))
+        LOG.append(dict(t=round(time.time(), 2), kind=event, **kw))
 
 
 def logged_in():
@@ -166,9 +166,9 @@ def logout():
 @app.route("/api/files/<kind>/<name>")
 def files(kind, name):
     if not logged_in():                       # 正式伺服器的媒體檔也要登入：驗證 App 播放器有帶 cookie
-        log("file_denied", kind=kind, name=name)
+        log("file_denied", ftype=kind, name=name)
         abort(401)
-    log("file", kind=kind, name=name)
+    log("file", ftype=kind, name=name)
     return send_from_directory(MEDIA, os.path.basename(name), conditional=True)
 
 

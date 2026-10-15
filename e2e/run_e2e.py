@@ -106,21 +106,26 @@ class Page:
         self.ws, self.n = None, 0
 
     def connect(self, url_part):
+        # 先關掉舊連線：DevTools 在頁面已經有人連著時，不會給出 webSocketDebuggerUrl
+        if self.ws:
+            try:
+                self.ws.close()
+            except Exception:
+                pass
+            self.ws = None
+            time.sleep(1)
+
         def find():
             names = re.findall(r"@(webview_devtools_remote_\d+)", sh("cat", "/proc/net/unix"))
             if not names:
                 return None
             adb("forward", "tcp:9222", "localabstract:" + names[-1])
             pages = json.load(urllib.request.urlopen("http://127.0.0.1:9222/json", timeout=5))
-            return next((p for p in pages if p.get("type") == "page" and url_part in p.get("url", "")), None)
+            return next((p for p in pages if p.get("type") == "page" and url_part in p.get("url", "")
+                         and p.get("webSocketDebuggerUrl")), None)
         page = wait_for(find, 60, 2)
         if not page:
             raise RuntimeError("找不到 WebView 頁面 " + url_part)
-        if self.ws:
-            try:
-                self.ws.close()
-            except Exception:
-                pass
         self.ws = websocket.create_connection(page["webSocketDebuggerUrl"], timeout=20, suppress_origin=True)
         return page["url"]
 
@@ -254,7 +259,13 @@ def main():
         reqs = [x for x in srvlog()[n0:] if x["kind"] in ("file", "file_denied")]
         names = [x["name"] for x in reqs if x["kind"] == "file"]
         check(f"[{label}] 媒體檔請求都有帶登入 cookie", reqs and not [x for x in reqs if x["kind"] == "file_denied"], names)
-        check(f"[{label}] 使用 {expect_kind} 版本", f"src={expect_kind}" in lc or f"-> {expect_kind}" in lc,
+        final_kind = None                      # 這支影片最後實際用的版本（看「use src」與「fallback」紀錄）
+        for l in lc.splitlines():
+            m1 = re.search(rf"item={idx} use src=(\w+)", l)
+            m2 = re.search(rf"fallback item={idx} -> (\w+)", l)
+            if m1 or m2:
+                final_kind = (m1 or m2).group(1)
+        check(f"[{label}] 使用 {expect_kind} 版本", final_kind == expect_kind,
               " / ".join(l.split("YTmateTV")[-1].strip() for l in lc.splitlines() if "src=" in l or "->" in l or "tracks" in l)[:300])
         for f in expect_files:
             check(f"[{label}] 有下載 {f}", f in names, names)
