@@ -109,6 +109,7 @@ class PlayerActivity : Activity() {
     private val noted = HashSet<Int>()
     private val resumed = HashSet<Int>()             // 這次已經套用過「從上次位置繼續」的影片
     private var lastKeyAt = 0L
+    private var playingSince = 0L
     private var consumedKey = 0
     private var controllerVisible = false
     private var curIdx = -1                          // 目前這支（記錄播放位置用）
@@ -257,6 +258,7 @@ class PlayerActivity : Activity() {
             // 開始播放 → 控制列重新計時（Just Player 的做法）；螢幕常亮只在播放中
             override fun onIsPlayingChanged(isPlaying: Boolean) {
                 Log.i(TAG, "playing=$isPlaying")
+                if (isPlaying) playingSince = SystemClock.uptimeMillis()
                 updateKeepScreenOn()
                 if (isPlaying && view.isControllerFullyVisible) {
                     view.controllerShowTimeoutMs = HIDE_MS
@@ -390,8 +392,9 @@ class PlayerActivity : Activity() {
             }
             // 自動測試版：每秒記一次控制列狀態（測試程式據此判斷控制列有沒有收起）
             if (BuildConfig.E2E) Log.i(TAG, "controller visible=${view.isControllerFullyVisible} playing=${player.isPlaying} tick")
+            val now = SystemClock.uptimeMillis()
             if (view.isControllerFullyVisible && player.isPlaying && hasWindowFocus() &&
-                SystemClock.uptimeMillis() - lastKeyAt > WATCHDOG_IDLE_MS) {
+                now - lastKeyAt > WATCHDOG_IDLE_MS && now - playingSince > HIDE_MS) {
                 Log.i(TAG, "controller watchdog hide")
                 view.hideController()
             }

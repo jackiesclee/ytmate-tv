@@ -261,7 +261,9 @@ def controller_cases(pg):
         return wait_for(lambda: "MainActivity" in resumed(), 10, 1)
 
     open_card(0)
-    time.sleep(16)
+    wait_for(lambda: player_log(r"playing=true"), 15, 0.5)
+    key("KEYCODE_DPAD_LEFT", 4, 0.3)              # 先倒轉回開頭（這支前面可能已經記過位置），再看 13 秒
+    time.sleep(13)
     adb("logcat", "-c")
     leave_player()
     saved = player_log(r"resume save vid=h264 pos=(\d+)")
@@ -481,8 +483,10 @@ def main():
     check("重新開啟 App → 自動登入（不用重新配對）", again and len([x for x in srvlog() if x["kind"] == "pair_start"]) == n_pair)
     time.sleep(4)
     shot("07_reopen")
-    pg.connect("/tv")
-    check("重新開啟 App → 畫質設定（480p）仍記得", pg.ev("getPref('quality')") == "low", pg.ev("getPref('quality')"))
+    n0 = len(srvlog())
+    key("KEYCODE_ENTER", 1, 3)                    # 首頁第一個頻道（格式測試）
+    chq = wait_for(lambda: [x for x in srvlog()[n0:] if x["kind"] == "channel"], 15, 1)
+    check("重新開啟 App → 畫質設定（480p）仍記得（頻道請求帶 q=low）", chq and chq[-1].get("q") == "low", chq[-1:] if chq else "")
 
 
 try:
