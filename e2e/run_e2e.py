@@ -137,7 +137,7 @@ class Page:
             pages = json.load(urllib.request.urlopen("http://127.0.0.1:9222/json", timeout=5))
             return next((p for p in pages if p.get("type") == "page" and url_part in p.get("url", "")
                          and p.get("webSocketDebuggerUrl")), None)
-        page = wait_for(find, 60, 2)
+        page = wait_for(find, 120, 2)          # 模擬器剛開機時 WebView 偵錯通道可能較慢出現
         if not page:
             raise RuntimeError("找不到 WebView 頁面 " + url_part)
         self.ws = websocket.create_connection(page["webSocketDebuggerUrl"], timeout=20, suppress_origin=True)
