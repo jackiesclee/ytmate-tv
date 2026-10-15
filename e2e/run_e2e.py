@@ -1,0 +1,324 @@
+# -*- coding: utf-8 -*-
+"""
+YTmate TV 模擬器自動測試（GitHub Actions 執行）。
+
+在 Android 電視模擬器上安裝「自動測試版」APK（連到 e2e/mock_server.py），全程用 adb 送出真的遙控器按鍵：
+  1. 第一次開啟 → 配對畫面（配對碼＋QR）→ 測試伺服器核准 → 自動登入首頁
+  2. 首頁：頻道卡片大小一致、16:9、每排 4 張、可以往下捲到最後一排、沒有橫向超出
+  3. 設定頁：顯示裝置資訊、解碼能力
+  4. 頻道頁 → 播放：
+       H.264 原檔 → 播原檔（截圖是藍色）
+       AV1（伺服器已知格式）→ 這台模擬器沒有 AV1 硬體解碼 → 直接播 480p（綠色），不下載 AV1 原檔
+       AV1（伺服器不知道格式）→ 先試原檔 → App 偵測畫面解不了 → 自動改 480p（綠色）
+       純音樂 → 只播聲音
+     媒體檔請求都要帶登入 cookie
+  5. 返回鍵：播放器 → 頻道頁 → 首頁；首頁連按兩次離開 App
+  6. 重新開啟 App → 不用重新配對，自動登入
+結果（report.md、results.json、截圖）輸出到 --out 資料夾。任何一項失敗 → 結束代碼 1。
+"""
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+import urllib.request
+
+import websocket
+from PIL import Image
+
+PKG = "net.iucat.ytmate.tv"
+SRV = "http://127.0.0.1:8765"
+ap = argparse.ArgumentParser()
+ap.add_argument("--apk", required=True)
+ap.add_argument("--out", required=True)
+ap.add_argument("--label", default="emulator")
+args = ap.parse_args()
+os.makedirs(args.out, exist_ok=True)
+RESULTS, INFO = [], {}
+
+
+def adb(*a, timeout=90, binary=False):
+    r = subprocess.run(["adb", *a], capture_output=True, timeout=timeout)
+    return r.stdout if binary else r.stdout.decode("utf-8", "ignore")
+
+
+def sh(*a):
+    return adb("shell", *a)
+
+
+def key(name, n=1, delay=0.8):
+    for _ in range(n):
+        sh("input", "keyevent", name)
+        time.sleep(delay)
+
+
+def shot(name):
+    data = adb("exec-out", "screencap", "-p", binary=True)
+    p = os.path.join(args.out, f"{args.label}_{name}.png")
+    with open(p, "wb") as f:
+        f.write(data)
+    return p
+
+
+def srvlog():
+    return json.load(urllib.request.urlopen(SRV + "/test/log", timeout=10))
+
+
+def check(name, ok, detail=""):
+    RESULTS.append({"name": name, "ok": bool(ok), "detail": str(detail)[:400]})
+    print(("✔ " if ok else "✘ ") + name + (f"  —  {detail}" if detail else ""), flush=True)
+    return ok
+
+
+def wait_for(fn, timeout, step=1.0):
+    t0 = time.time()
+    last = None
+    while time.time() - t0 < timeout:
+        try:
+            last = fn()
+            if last:
+                return last
+        except Exception as e:
+            last = e
+        time.sleep(step)
+    return None
+
+
+def resumed():
+    """目前在最上層的畫面（Activity）名稱。"""
+    out = sh("dumpsys", "activity", "activities")
+    m = re.search(r"(?:mResumedActivity|ResumedActivity|topResumedActivity)[^\n]*?\{[^\n]*?(\S+/\S+)", out)
+    if m:
+        return m.group(1)
+    m = re.search(r"mCurrentFocus=[^\n]*?(\S+/\S+)\}", sh("dumpsys", "window"))
+    return m.group(1) if m else ""
+
+
+def logcat():
+    return adb("logcat", "-d", "-s", "YTmateTV:*")
+
+
+# ── WebView DevTools（自動測試版才有開）──
+class Page:
+    def __init__(self):
+        self.ws, self.n = None, 0
+
+    def connect(self, url_part):
+        def find():
+            names = re.findall(r"@(webview_devtools_remote_\d+)", sh("cat", "/proc/net/unix"))
+            if not names:
+                return None
+            adb("forward", "tcp:9222", "localabstract:" + names[-1])
+            pages = json.load(urllib.request.urlopen("http://127.0.0.1:9222/json", timeout=5))
+            return next((p for p in pages if p.get("type") == "page" and url_part in p.get("url", "")), None)
+        page = wait_for(find, 60, 2)
+        if not page:
+            raise RuntimeError("找不到 WebView 頁面 " + url_part)
+        if self.ws:
+            try:
+                self.ws.close()
+            except Exception:
+                pass
+        self.ws = websocket.create_connection(page["webSocketDebuggerUrl"], timeout=20, suppress_origin=True)
+        return page["url"]
+
+    def ev(self, expr):
+        self.n += 1
+        self.ws.send(json.dumps({"id": self.n, "method": "Runtime.evaluate", "params": {"expression": expr, "returnByValue": True}}))
+        while True:
+            m = json.loads(self.ws.recv())
+            if m.get("id") == self.n:
+                res = m.get("result", {}).get("result", {})
+                return res.get("value")
+
+    def state(self):
+        v = self.ev("window.tvState ? tvState() : ''")
+        return json.loads(v) if v else {}
+
+
+def color_at(png, fx=0.15, fy=0.45):
+    """取畫面某一點的主色：blue（H.264 原檔）／red（AV1 原檔）／green（480p 相容版）／dark（沒有畫面）。"""
+    im = Image.open(png).convert("RGB")
+    w, h = im.size
+    pts = [(int(w * fx + dx), int(h * fy + dy)) for dx in (-10, 0, 10) for dy in (-10, 0, 10)]
+    r = sum(im.getpixel(p)[0] for p in pts) / 9
+    g = sum(im.getpixel(p)[1] for p in pts) / 9
+    b = sum(im.getpixel(p)[2] for p in pts) / 9
+    if max(r, g, b) < 25:
+        return "dark", (int(r), int(g), int(b))
+    top = max((r, "red"), (g, "green"), (b, "blue"))[1]
+    return top, (int(r), int(g), int(b))
+
+
+def main():
+    pg = Page()
+    INFO["device"] = sh("getprop", "ro.product.model").strip() + " / Android " + sh("getprop", "ro.build.version.release").strip()
+    wvpkg = sh("dumpsys", "webviewupdate")
+    m = re.search(r"Current WebView package.*?\(([^,]+),\s*([\d.]+)\)", wvpkg)
+    INFO["webview"] = m.group(2) if m else ""
+    print("裝置：", INFO, flush=True)
+
+    # ① 安裝、第一次開啟 → 配對畫面
+    print(adb("install", "-r", "-g", args.apk, timeout=240).strip())
+    adb("logcat", "-c")
+    sh("am", "start", "-n", f"{PKG}/.MainActivity")
+    got = wait_for(lambda: [x for x in srvlog() if x["kind"] == "pair_start"], 120, 2)
+    check("第一次開啟顯示配對畫面（向伺服器要配對碼）", got, got[-1] if got else "沒有收到配對請求")
+    time.sleep(3)
+    pg.connect("/tv/pair")
+    digits = pg.ev("document.querySelectorAll('#code span').length")
+    qr = pg.ev("!!document.querySelector('#qr svg')")
+    check("配對畫面：6 位數配對碼＋QR code", digits == 6 and qr, f"digits={digits} qr={qr}")
+    shot("01_pair")
+
+    # ② 核准 → 自動登入首頁
+    urllib.request.urlopen(urllib.request.Request(SRV + "/test/approve", method="POST"), timeout=10)
+    ok = wait_for(lambda: [x for x in srvlog() if x["kind"] == "login_ok"], 40, 1)
+    check("手機核准後電視自動登入", ok)
+    time.sleep(3)
+    pg.connect("/tv")
+    st = wait_for(lambda: pg.state() if pg.state().get("view") == "home" and pg.ev("document.querySelectorAll('.grid .card').length") == 12 else None, 40, 1)
+    check("首頁載入 12 個頻道", st, st)
+    INFO["chrome"] = (st or {}).get("chrome")
+    INFO["decoders"] = (st or {}).get("decoders")
+    INFO["lite"] = (st or {}).get("lite")
+    check(f"網頁核心 Chrome {INFO['chrome']}：{'自動開啟輕量模式' if INFO['lite'] else '一般模式'}",
+          (INFO["chrome"] or 0) >= 80 or INFO["lite"], INFO)
+    check("App 回報解碼能力（一定含 H.264）", "h264" in (INFO["decoders"] or ""), INFO["decoders"])
+
+    # ③ 卡片大小一致、16:9、每排 4 張、沒有橫向超出
+    # 用版面尺寸（offsetWidth）量：選中的卡片會刻意放大 8%，畫面上的外框不能拿來比
+    rects = json.loads(pg.ev("JSON.stringify(Array.prototype.map.call(document.querySelectorAll('.grid .card'),function(c){var e=c.querySelector('.art');return [e.offsetWidth,e.offsetHeight,c.offsetTop]}))"))
+    ws_, hs_ = [r[0] for r in rects], [r[1] for r in rects]
+    check("頻道卡片大小全部一致", max(ws_) - min(ws_) < 1.5 and max(hs_) - min(hs_) < 1.5, f"寬 {min(ws_):.1f}–{max(ws_):.1f}、高 {min(hs_):.1f}–{max(hs_):.1f}")
+    check("頻道卡片是 16:9", all(abs(h / w - 0.5625) < 0.02 for w, h in zip(ws_, hs_)), f"{hs_[0] / ws_[0]:.3f}")
+    rows = sorted(set(r[2] for r in rects))
+    check("每排 4 張、共 3 排", len(rows) == 3 and all(sum(1 for r in rects if r[2] == y) == 4 for y in rows), f"rows={rows}")
+    sw = pg.ev("document.documentElement.scrollWidth + ',' + window.innerWidth")
+    a, b = map(float, sw.split(","))
+    check("沒有橫向超出畫面", a <= b + 1, sw)
+    need_scroll = pg.ev("document.getElementById('scroller').scrollHeight > window.innerHeight")
+    check("首頁內容超過一個畫面（需要往下捲）", need_scroll)
+    shot("02_home_top")
+
+    # ④ 遙控器往下 → 捲到最後一排
+    key("KEYCODE_DPAD_DOWN", 2)
+    time.sleep(1)
+    st = pg.state()
+    vis = json.loads(pg.ev("(function(){var r=document.querySelector('.card.focus').getBoundingClientRect();return JSON.stringify([r.top,r.bottom,window.innerHeight])})()"))
+    check("按「下」兩次 → 選到最後一排、畫面跟著往下捲", st.get("scrollTop", 0) > 0 and vis[0] >= 0 and vis[1] <= vis[2] + 1,
+          f"scrollTop={st.get('scrollTop')} focus={vis}")
+    shot("03_home_scrolled")
+    key("KEYCODE_DPAD_RIGHT", 3)
+    check("按「右」移到最後一個頻道", pg.state().get("focusId") == "c11", pg.state().get("focusId"))
+    key("KEYCODE_DPAD_UP", 2)
+    time.sleep(0.5)
+    check("按「上」回到第一排、捲回頂端", pg.state().get("scrollTop", 1) == 0, pg.state())
+
+    # ⑤ 設定頁（裝置資訊）
+    key("KEYCODE_DPAD_UP", 1)
+    check("第一排再按「上」→ 選到 ⚙", pg.state().get("focusAct") == "settings", pg.state())
+    key("KEYCODE_ENTER", 1, 1.5)
+    opened = pg.ev("document.getElementById('settings').className.indexOf('on')>=0")
+    txt = pg.ev("document.getElementById('decs').textContent + ' | ' + document.getElementById('wv').textContent + ' | ' + document.getElementById('model').textContent")
+    check("設定頁顯示裝置資訊與解碼能力", opened and "H264" in (txt or ""), txt)
+    shot("04_settings")
+    key("KEYCODE_BACK", 1, 1.5)
+    check("返回鍵關閉設定頁", not pg.ev("document.getElementById('settings').className.indexOf('on')>=0"))
+
+    # ⑥ 進入「格式測試」頻道
+    key("KEYCODE_DPAD_DOWN", 1)
+    pg.ev("setFocus(document.querySelector('[data-id=fmt]'))")
+    key("KEYCODE_ENTER", 1, 3)
+    st = wait_for(lambda: pg.state() if pg.state().get("view") == "channel" else None, 20, 1)
+    check("確認鍵開啟頻道頁", st, st)
+    chreq = [x for x in srvlog() if x["kind"] == "channel"]
+    check("頻道清單請求帶著這台電視的解碼能力", chreq and chreq[-1]["dec"], chreq[-1] if chreq else "")
+    badge = pg.ev("(function(){var c=document.querySelectorAll('.grid.songs .card');return c[1].innerText+' || '+c[3].innerText})()")
+    av1_hw = "av1" in (INFO["decoders"] or "")
+    check("AV1 影片卡片標示 480p（這台不支援 AV1）；純音樂標示音樂", (av1_hw or "480p" in badge) and "音樂" in badge, badge)
+    shot("05_channel")
+
+    # ⑦ 播放測試
+    def play_case(idx, label, expect_kind, expect_color, expect_files, forbid_files=(), fallback=False):
+        adb("logcat", "-c")
+        n0 = len(srvlog())
+        pg.ev(f"setFocus(document.querySelector('.grid.songs .card[data-i=\"{idx}\"]'))")
+        key("KEYCODE_ENTER", 1, 1)
+        top = wait_for(lambda: "PlayerActivity" in resumed(), 15, 1)
+        check(f"[{label}] 開啟原生播放器", top)
+        time.sleep(14 if fallback else 9)
+        lc = logcat()
+        reqs = [x for x in srvlog()[n0:] if x["kind"] in ("file", "file_denied")]
+        names = [x["name"] for x in reqs if x["kind"] == "file"]
+        check(f"[{label}] 媒體檔請求都有帶登入 cookie", reqs and not [x for x in reqs if x["kind"] == "file_denied"], names)
+        check(f"[{label}] 使用 {expect_kind} 版本", f"src={expect_kind}" in lc or f"-> {expect_kind}" in lc,
+              " / ".join(l.split("YTmateTV")[-1].strip() for l in lc.splitlines() if "src=" in l or "->" in l or "tracks" in l)[:300])
+        for f in expect_files:
+            check(f"[{label}] 有下載 {f}", f in names, names)
+        for f in forbid_files:
+            check(f"[{label}] 沒有去下載 {f}（省流量）", f not in names, names)
+        if fallback:
+            check(f"[{label}] App 偵測到畫面解不了 → 自動改用 480p", "fallback" in lc and "-> low" in lc, lc[-300:])
+        p = shot(f"06_play_{label}")
+        if expect_color:
+            col, rgb = color_at(p)
+            check(f"[{label}] 畫面確實有影像（{ {'blue': 'H.264 原檔藍色', 'green': '480p 相容版綠色'}[expect_color] }）", col == expect_color, f"{col} {rgb}")
+        for _ in range(3):                  # 控制列顯示中：第一次收起、第二次離開；已隱藏：一次就離開
+            key("KEYCODE_BACK", 1, 1.5)
+            if "MainActivity" in resumed():
+                break
+        back = wait_for(lambda: "MainActivity" in resumed(), 10, 1)
+        check(f"[{label}] 返回鍵回到頻道頁", back and pg.state().get("view") == "channel", pg.state().get("view"))
+
+    play_case(0, "h264", "original", "blue", ["h264.mp4"])
+    if av1_hw:
+        play_case(1, "av1_known", "original", None, ["av1.mp4"])
+    else:
+        play_case(1, "av1_known", "low", "green", ["low.mp4"], forbid_files=["av1.mp4"])
+        play_case(2, "av1_unknown", "low", "green", ["av1.mp4", "low.mp4"], fallback=True)
+    play_case(3, "music", "audio", None, ["audio.mp3"])
+
+    # ⑧ 返回鍵：頻道頁 → 首頁 → 連按兩次離開
+    key("KEYCODE_BACK", 1, 1.5)
+    check("頻道頁按返回 → 回到首頁、停在原本的頻道", pg.state().get("view") == "home" and pg.state().get("focusId") == "fmt", pg.state())
+    key("KEYCODE_BACK", 1, 0.4)
+    key("KEYCODE_BACK", 1, 2)
+    gone = PKG not in resumed()
+    check("首頁連按兩次返回 → 離開 App", gone)
+
+    # ⑨ 重新開啟 → 不用重新配對
+    n_pair = len([x for x in srvlog() if x["kind"] == "pair_start"])
+    n_login = len([x for x in srvlog() if x["kind"] == "login_ok"])
+    sh("am", "start", "-n", f"{PKG}/.MainActivity")
+    again = wait_for(lambda: len([x for x in srvlog() if x["kind"] == "login_ok"]) > n_login, 40, 1)
+    check("重新開啟 App → 自動登入（不用重新配對）", again and len([x for x in srvlog() if x["kind"] == "pair_start"]) == n_pair)
+    time.sleep(4)
+    shot("07_reopen")
+
+
+try:
+    main()
+except Exception as e:
+    import traceback
+    traceback.print_exc()
+    check("測試流程執行完成（沒有中途出錯）", False, repr(e))
+    try:
+        shot("99_error")
+    except Exception:
+        pass
+
+passed = sum(1 for r in RESULTS if r["ok"])
+with open(os.path.join(args.out, f"{args.label}_results.json"), "w", encoding="utf-8") as f:
+    json.dump({"label": args.label, "info": INFO, "passed": passed, "total": len(RESULTS), "results": RESULTS}, f, ensure_ascii=False, indent=1)
+with open(os.path.join(args.out, f"{args.label}_report.md"), "w", encoding="utf-8") as f:
+    f.write(f"# YTmate TV 模擬器測試：{args.label}\n\n裝置：{INFO.get('device')}　WebView：{INFO.get('webview')}　"
+            f"Chrome {INFO.get('chrome')}　解碼：{INFO.get('decoders')}\n\n**{passed}/{len(RESULTS)} 通過**\n\n")
+    for r in RESULTS:
+        f.write(f"- {'✅' if r['ok'] else '❌'} {r['name']}" + (f" — `{r['detail']}`" if r["detail"] else "") + "\n")
+with open(os.path.join(args.out, f"{args.label}_logcat.txt"), "w", encoding="utf-8") as f:
+    f.write(adb("logcat", "-d", timeout=60)[-200000:])
+print(f"\n{passed}/{len(RESULTS)} 通過")
+sys.exit(0 if passed == len(RESULTS) and RESULTS else 1)

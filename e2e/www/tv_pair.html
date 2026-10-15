@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>YTmate TV — 配對</title>
+<link rel="icon" href="/assets/tv_icon.png">
+<style>
+/* 📺 電視第一次開啟的配對畫面（2026-10-14）：大號配對碼＋QR code，手機掃碼核准後自動登入 */
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%;overflow:hidden}
+body{background:radial-gradient(circle at 18% 30%,rgba(124,58,237,.45),transparent 45%),radial-gradient(circle at 85% 80%,rgba(249,115,22,.30),transparent 45%),#09090f;
+  color:#f4f4f8;font-family:'Noto Sans TC','Noto Sans CJK TC','PingFang TC','Microsoft JhengHei',sans-serif;display:flex;align-items:center;justify-content:center}
+.wrap{display:-webkit-box;display:-webkit-flex;display:flex;-webkit-box-align:center;-webkit-align-items:center;align-items:center}
+.wrap>div+div{margin-left:6vw}
+/* 2026-10-15：相容舊電視的網頁核心（不用 flex gap） */
+.left{max-width:44vw}
+.brand{display:-webkit-box;display:-webkit-flex;display:flex;-webkit-box-align:center;-webkit-align-items:center;align-items:center;font-size:2.6vw;font-weight:800;letter-spacing:-.02em}
+.brand img{width:4.4vw;height:4.4vw;border-radius:1vw;margin-right:1.2vw}
+.brand small{font-size:1.1vw;color:#be185d;background:#fff;border-radius:.5vw;padding:.1vw .6vw;margin-left:.8vw}
+h1{font-size:2.3vw;margin:3vw 0 1.2vw;font-weight:700}
+ol{font-size:1.45vw;line-height:2;color:#d4d4e0;padding-left:2vw}
+ol b{color:#fff}
+.code{display:-webkit-box;display:-webkit-flex;display:flex;margin-top:2.4vw}
+.code span{display:-webkit-box;display:-webkit-flex;-webkit-box-align:center;-webkit-box-pack:center;-webkit-align-items:center;-webkit-justify-content:center;margin-right:.8vw;width:5.2vw;height:7vw;border-radius:1vw;background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.18);display:flex;align-items:center;justify-content:center;font-size:4.4vw;font-weight:800;font-variant-numeric:tabular-nums}
+.url{margin-top:1.6vw;font-size:1.3vw;color:#a3a3b8}
+.url b{color:#f9a8d4;font-weight:600}
+.qrbox{background:#fff;border-radius:1.6vw;padding:1.6vw;box-shadow:0 2vw 5vw rgba(0,0,0,.5)}
+#qr{width:22vw;height:22vw}#qr img,#qr svg{width:100%;height:100%;display:block}
+.cap{text-align:center;margin-top:1.1vw;font-size:1.25vw;color:#a3a3b8}
+.status{margin-top:2vw;font-size:1.35vw;color:#a3a3b8;display:-webkit-box;display:-webkit-flex;display:flex;-webkit-box-align:center;-webkit-align-items:center;align-items:center}
+.dot{width:.9vw;height:.9vw;border-radius:50%;background:#ec4899;margin-right:.8vw;-webkit-animation:pulse 1.4s ease-in-out infinite;animation:pulse 1.4s ease-in-out infinite}
+@-webkit-keyframes pulse{50%{opacity:.25}}
+@keyframes pulse{50%{opacity:.25}}
+.warn{margin-top:1.4vw;color:#fbbf24;font-size:1.3vw}
+.ok{color:#4ade80}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="left">
+    <div class="brand"><img src="/assets/tv_icon.png" alt="">YTmate<small>TV</small></div>
+    <h1>用手機配對這台電視</h1>
+    <ol>
+      <li>用<b>已登入 YTmate 的手機</b>掃描右邊的 QR code</li>
+      <li>或在手機打開下方網址，輸入<b>配對碼</b></li>
+      <li>按「<b>允許這台電視</b>」，電視會自動登入</li>
+    </ol>
+    <div class="code" id="code"><span>·</span><span>·</span><span>·</span><span>·</span><span>·</span><span>·</span></div>
+    <div class="url">手機網址：<b id="url"></b></div>
+    <div class="warn" id="warn"></div>
+    <div class="status" id="status"><div class="dot"></div><span>等待手機確認…</span></div>
+  </div>
+  <div><div class="qrbox"><div id="qr"></div></div><div class="cap" id="cap">配對碼 10 分鐘內有效，過期會自動換新</div></div>
+</div>
+<script src="/assets/vendor/qrcode.js"></script>
+<script>
+'use strict';
+var NATIVE = window.YTmateTV || null;
+var $ = function (id) { return document.getElementById(id); };
+var P = null, timer = null;
+var reason = new URLSearchParams(location.search).get('reason');
+if (reason === 'revoked') {
+  $('warn').textContent = '這台電視的配對已失效（可能在手機上被取消），請重新配對。';
+  if (NATIVE && NATIVE.clearToken) NATIVE.clearToken();
+}
+$('url').textContent = location.host + '/pair';
+function deviceName() { try { return NATIVE && NATIVE.deviceName ? NATIVE.deviceName() : '電視'; } catch (e) { return '電視'; } }
+function setStatus(html) { $('status').innerHTML = html; }
+function start() {
+  clearTimeout(timer);
+  fetch('/api/tv/pair/start', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: deviceName() }) })
+    .then(function (r) { return r.json(); })
+    .then(function (j) {
+      if (j.error) throw new Error(j.error);
+      P = j;
+      $('code').innerHTML = j.code.split('').map(function (d) { return '<span>' + d + '</span>'; }).join('');
+      var link = location.origin + '/pair?code=' + j.code;
+      var qr = qrcode(0, 'M'); qr.addData(link); qr.make();
+      $('qr').innerHTML = qr.createSvgTag({ cellSize: 8, margin: 0, scalable: true });
+      setStatus('<div class="dot"></div><span>等待手機確認…</span>');
+      timer = setTimeout(poll, 2000);
+    })
+    .catch(function (e) { setStatus('<span>⚠ 無法連到伺服器（' + (e.message || e) + '），10 秒後重試…</span>'); timer = setTimeout(start, 10000); });
+}
+function poll() {
+  fetch('/api/tv/pair/poll', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pair_id: P.pair_id, poll_secret: P.poll_secret }) })
+    .then(function (r) { return r.json(); })
+    .then(function (j) {
+      if (j.status === 'approved') { done(j.token); return; }
+      if (j.status === 'expired') { start(); return; }
+      timer = setTimeout(poll, 2000);
+    })
+    .catch(function () { timer = setTimeout(poll, 4000); });
+}
+function done(token) {
+  setStatus('<span class="ok">✅ 配對成功，登入中…</span>');
+  if (NATIVE && NATIVE.saveToken) { NATIVE.saveToken(token); return; }   // App：存金鑰，由 App 登入並開啟電視版首頁
+  fetch('/api/tv/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'same-origin', body: JSON.stringify({ token: token }) })
+    .then(function () { location.href = '/tv'; });
+}
+start();
+</script>
+</body>
+</html>

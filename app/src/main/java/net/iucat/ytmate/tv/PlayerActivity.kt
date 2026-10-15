@@ -10,6 +10,7 @@ import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.util.Log
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.KeyEvent
@@ -28,6 +29,7 @@ import androidx.media3.common.MediaMetadata
 import androidx.media3.common.MimeTypes
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
+import androidx.media3.common.Tracks
 import androidx.annotation.OptIn
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DefaultHttpDataSource
@@ -48,16 +50,23 @@ import kotlin.concurrent.thread
  *   返回＝先收起控制列，再按一次回到頻道頁。
  * 媒體檔需要登入：沿用 WebView 的 session cookie 送出請求。
  * 只有聲音的項目（音樂）顯示縮圖＋標題；每支開始播放時左上角顯示標題 4 秒。播完整個清單自動回到頻道頁。
+ *
+ * 2026-10-15：每支影片附「多個版本」（伺服器依這台電視的解碼能力排好順序：原檔 → 480p 相容版 → 純聲音）。
+ * 播放時如果發現影像軌這台電視解不了（例如舊電視遇到 AV1），自動換下一個版本、從同一個時間點繼續，
+ * 不會再出現「只有聲音沒有畫面」。
  */
 @OptIn(UnstableApi::class)
 class PlayerActivity : Activity() {
 
     companion object {
+        const val TAG = "YTmateTV"
         @Volatile
         var pending: String? = null      // MainActivity 傳來的播放清單 JSON（清單可能很長，不放 Intent）
     }
 
-    private data class Item(val url: String, val audio: Boolean, val title: String, val artist: String, val thumb: String)
+    private data class Src(val url: String, val kind: String, val codec: String)
+    private data class Item(val sources: List<Src>, val title: String, val artist: String, val thumb: String, val note: String,
+                            val subUrl: String, val subLang: String)
 
     private lateinit var player: ExoPlayer
     private lateinit var view: PlayerView
@@ -70,6 +79,8 @@ class PlayerActivity : Activity() {
     private val ui = Handler(Looper.getMainLooper())
     private var cookie: String = ""
     private var errorsInRow = 0
+    private lateinit var srcIdx: IntArray            // 每支影片目前用第幾個版本
+    private val noted = HashSet<Int>()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -99,26 +110,25 @@ class PlayerActivity : Activity() {
         player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
             .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true).build()
 
-        val mediaItems = ArrayList<MediaItem>()
         for (i in 0 until arr.length()) {
             val o = arr.getJSONObject(i)
-            val it = Item(o.getString("url"), o.optBoolean("audio"), o.optString("title"), o.optString("artist"), o.optString("thumb"))
-            items.add(it)
-            val meta = MediaMetadata.Builder().setTitle(it.title).setArtist(it.artist)
-            if (it.thumb.isNotEmpty()) meta.setArtworkUri(Uri.parse(it.thumb))
-            val b = MediaItem.Builder().setUri(it.url).setMediaId(i.toString()).setMediaMetadata(meta.build())
-            val sub = o.optJSONObject("sub")
-            if (sub != null && sub.optString("url").isNotEmpty()) {
-                b.setSubtitleConfigurations(listOf(
-                    MediaItem.SubtitleConfiguration.Builder(Uri.parse(sub.getString("url")))
-                        .setMimeType(MimeTypes.TEXT_VTT)
-                        .setLanguage(sub.optString("lang").substringBefore("-ai"))
-                        .setLabel(if (sub.optString("lang").startsWith("zh")) "中文字幕" else "English")
-                        .build()))
+            val srcs = ArrayList<Src>()
+            val sa = o.optJSONArray("sources")
+            if (sa != null) for (k in 0 until sa.length()) {
+                val x = sa.getJSONObject(k)
+                if (x.optString("url").isNotEmpty()) srcs.add(Src(x.getString("url"), x.optString("kind"), x.optString("codec")))
             }
-            mediaItems.add(b.build())
+            if (srcs.isEmpty() && o.optString("url").isNotEmpty())        // 舊版頁面（只有單一網址）也能播
+                srcs.add(Src(o.getString("url"), if (o.optBoolean("audio")) "audio" else "original", ""))
+            if (srcs.isEmpty()) continue
+            val sub = o.optJSONObject("sub")
+            items.add(Item(srcs, o.optString("title"), o.optString("artist"), o.optString("thumb"), o.optString("note"),
+                sub?.optString("url") ?: "", sub?.optString("lang") ?: ""))
         }
-        if (mediaItems.isEmpty()) { finish(); return }
+        if (items.isEmpty()) { finish(); return }
+        srcIdx = IntArray(items.size)
+        val mediaItems = ArrayList<MediaItem>()
+        for (i in items.indices) mediaItems.add(buildItem(i))
 
         buildUi()
         view.player = player
@@ -128,11 +138,34 @@ class PlayerActivity : Activity() {
                 showItem(player.currentMediaItemIndex)
             }
 
+            // 影像軌這台電視解不了（例如舊電視遇到 AV1）→ 換下一個版本
+            override fun onTracksChanged(tracks: Tracks) {
+                val i = player.currentMediaItemIndex
+                val cur = items.getOrNull(i)?.sources?.getOrNull(srcIdx[i]) ?: return
+                if (cur.kind == "audio") return
+                var hasVideo = false
+                var videoOk = false
+                for (g in tracks.groups) {
+                    if (g.type == C.TRACK_TYPE_VIDEO) {
+                        hasVideo = true
+                        if (g.isSupported) videoOk = true
+                    }
+                }
+                Log.i(TAG, "tracks item=$i src=${cur.kind} codec=${cur.codec} hasVideo=$hasVideo videoOk=$videoOk")
+                if (hasVideo && !videoOk) fallback(i, "這台電視解不了原檔畫面，改用相容版本")
+            }
+
             override fun onPlaybackStateChanged(state: Int) {
                 if (state == Player.STATE_ENDED) finish()     // 整個清單播完 → 回到頻道頁
             }
 
             override fun onPlayerError(error: PlaybackException) {
+                val i = player.currentMediaItemIndex
+                Log.w(TAG, "error item=$i src=${srcIdx.getOrNull(i)} ${error.errorCodeName}")
+                if (i in items.indices && srcIdx[i] < items[i].sources.size - 1) {   // 還有其他版本 → 先換版本
+                    fallback(i, "這個版本無法播放，改用相容版本")
+                    return
+                }
                 errorsInRow++
                 if (errorsInRow >= 3 || !player.hasNextMediaItem()) {
                     Toast.makeText(this@PlayerActivity, "無法播放（${error.errorCodeName}），請確認網路或稍後再試", Toast.LENGTH_LONG).show()
@@ -148,6 +181,39 @@ class PlayerActivity : Activity() {
         player.prepare()
         player.playWhenReady = true
         showItem(start.coerceIn(0, mediaItems.size - 1))
+    }
+
+    private fun buildItem(i: Int): MediaItem {
+        val it = items[i]
+        val src = it.sources[srcIdx[i]]
+        val meta = MediaMetadata.Builder().setTitle(it.title).setArtist(it.artist)
+        if (it.thumb.isNotEmpty()) meta.setArtworkUri(Uri.parse(it.thumb))
+        val b = MediaItem.Builder().setUri(src.url).setMediaId("$i:${srcIdx[i]}").setMediaMetadata(meta.build())
+        if (it.subUrl.isNotEmpty() && src.kind != "audio") {
+            b.setSubtitleConfigurations(listOf(
+                MediaItem.SubtitleConfiguration.Builder(Uri.parse(it.subUrl))
+                    .setMimeType(MimeTypes.TEXT_VTT)
+                    .setLanguage(it.subLang.substringBefore("-ai"))
+                    .setLabel(if (it.subLang.startsWith("zh")) "中文字幕" else "English")
+                    .build()))
+        }
+        Log.i(TAG, "item=$i use src=${src.kind} codec=${src.codec} url=${src.url}")
+        return b.build()
+    }
+
+    /** 換成這支影片的下一個版本，從同一個時間點繼續播。 */
+    private fun fallback(i: Int, msg: String) {
+        if (i !in items.indices || srcIdx[i] >= items[i].sources.size - 1) return
+        val pos = player.currentPosition.coerceAtLeast(0L)
+        srcIdx[i]++
+        val next = items[i].sources[srcIdx[i]]
+        Log.i(TAG, "fallback item=$i -> ${next.kind}")
+        Toast.makeText(this, if (next.kind == "audio") "這台電視解不了這支影片的畫面，先播放聲音（相容版轉檔中）" else msg, Toast.LENGTH_LONG).show()
+        player.replaceMediaItem(i, buildItem(i))
+        player.seekTo(i, pos)
+        player.prepare()
+        player.play()
+        showItem(i)
     }
 
     private fun dp(v: Float): Int = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, v, resources.displayMetrics).toInt()
@@ -195,12 +261,14 @@ class PlayerActivity : Activity() {
 
     private fun showItem(i: Int) {
         val it = items.getOrNull(i) ?: return
+        val audio = it.sources[srcIdx[i]].kind == "audio"
+        if (it.note.isNotEmpty() && noted.add(i)) Toast.makeText(this, it.note, Toast.LENGTH_LONG).show()
         titleText.text = it.title
         subText.text = listOf(it.artist, "${i + 1} / ${items.size}").filter { s -> s.isNotEmpty() }.joinToString("  ·  ")
         titleBox.animate().cancel(); titleBox.alpha = 1f
         ui.removeCallbacks(hideTitle)
-        if (!it.audio) ui.postDelayed(hideTitle, 4000)       // 音樂一直顯示標題；影片 4 秒後隱藏
-        if (it.audio) {
+        if (!audio) ui.postDelayed(hideTitle, 4000)       // 音樂一直顯示標題；影片 4 秒後隱藏
+        if (audio) {
             art.setImageDrawable(null); artBg.setImageDrawable(null)
             art.visibility = View.VISIBLE; artBg.visibility = View.VISIBLE
             if (it.thumb.isNotEmpty()) loadImage(it.thumb) { bmp -> if (player.currentMediaItemIndex == i) { art.setImageBitmap(bmp); artBg.setImageBitmap(bmp) } }
@@ -267,7 +335,7 @@ class PlayerActivity : Activity() {
         titleText.text = it.title
         titleBox.animate().cancel(); titleBox.alpha = 1f
         ui.removeCallbacks(hideTitle)
-        if (!it.audio) ui.postDelayed(hideTitle, 2500)
+        if (it.sources[srcIdx[i]].kind != "audio") ui.postDelayed(hideTitle, 2500)
     }
 
     private fun fmt(s: Long): String {

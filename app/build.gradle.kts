@@ -26,6 +26,8 @@ android {
         versionCode = buildNo
         versionName = "1.0.$buildNo"
         buildConfigField("String", "BASE_URL", "\"$baseUrl\"")
+        buildConfigField("boolean", "E2E", "false")
+        manifestPlaceholders["cleartext"] = "false"
     }
 
     signingConfigs {
@@ -40,6 +42,15 @@ android {
     }
 
     buildTypes {
+        // 自動測試版（GitHub Actions 的模擬器測試用）：連到測試伺服器（模擬器裡的 10.0.2.2＝執行測試的機器）、
+        // 允許 http、開啟 WebView 偵錯。正式版不受影響。
+        create("e2e") {
+            initWith(getByName("debug"))
+            buildConfigField("String", "BASE_URL", "\"http://10.0.2.2:8765\"")
+            buildConfigField("boolean", "E2E", "true")
+            manifestPlaceholders["cleartext"] = "true"
+            signingConfig = signingConfigs.getByName("debug")
+        }
         release {
             isMinifyEnabled = false
             signingConfig = if (hasKs) signingConfigs.getByName("release") else signingConfigs.getByName("debug")

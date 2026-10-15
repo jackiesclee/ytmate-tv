@@ -1,0 +1,101 @@
+# YTmate TV 自動測試：
+#   compat   ── 檢查電視頁面的 CSS／JS 在 Android 7.0（Chrome 53）以上的網頁核心都能用
+#   emulator ── 在 Android 7.0 與 Android 9 的「電視」模擬器上安裝自動測試版 APK，用遙控器按鍵跑完整流程
+#               （配對、首頁捲動、卡片大小、設定、播放 H.264／AV1→480p／純音樂、返回鍵、重開自動登入）
+# 結果（報告＋截圖＋logcat）發佈在 Releases 的「e2e-api24」「e2e-api28」（預覽版，不影響正式 APK 下載）。
+name: E2E 測試
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  compat:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: 相容性檢查（Chrome 53＝Android 7.0）
+        run: |
+          mkdir -p /tmp/compat && cd /tmp/compat && npm init -y >/dev/null
+          npm i --silent doiuse@6 postcss@8 eslint@8 eslint-plugin-compat@4
+          cp "$GITHUB_WORKSPACE/e2e/compat_check.js" .
+          node compat_check.js "$GITHUB_WORKSPACE/e2e/www/tv.html" "$GITHUB_WORKSPACE/e2e/www/tv_pair.html"
+
+  emulator:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        api: [24, 28]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 開啟 KVM（模擬器硬體加速）
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
+
+      - name: 編譯自動測試版 APK
+        run: gradle :app:assembleE2e --no-daemon
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: 啟動測試伺服器
+        run: |
+          pip install flask websocket-client pillow
+          nohup python e2e/mock_server.py > mock_server.log 2>&1 &
+          sleep 3 && curl -s -o /dev/null -w "測試伺服器 HTTP %{http_code}\n" http://127.0.0.1:8765/tv/pair
+
+      - name: 模擬器測試（Android API ${{ matrix.api }} 電視映像）
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: ${{ matrix.api }}
+          target: android-tv
+          arch: x86
+          profile: tv_1080p
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -no-boot-anim -camera-back none
+          script: python e2e/run_e2e.py --apk app/build/outputs/apk/e2e/app-e2e.apk --out e2e-out --label api${{ matrix.api }} || echo "E2E_FAILED=1" >> "$GITHUB_ENV"
+
+      - name: 整理結果
+        if: always()
+        run: |
+          mkdir -p e2e-out && cp mock_server.log e2e-out/api${{ matrix.api }}_mock_server.log || true
+          ls -la e2e-out
+          cat e2e-out/*_report.md || true
+
+      - name: 發佈測試結果（Releases：e2e-api${{ matrix.api }}）
+        if: always()
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: e2e-api${{ matrix.api }}
+          name: E2E 測試結果 Android API ${{ matrix.api }}
+          prerelease: true
+          make_latest: false
+          body_path: e2e-out/api${{ matrix.api }}_report.md
+          files: e2e-out/*
+          overwrite_files: true
+
+      - name: 測試失敗就讓這個 job 失敗
+        if: env.E2E_FAILED == '1'
+        run: exit 1

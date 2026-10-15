@@ -5,6 +5,7 @@ import android.app.Activity
 import android.content.Context
 import android.content.Intent
 import android.graphics.Color
+import android.media.MediaCodecList
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -19,6 +20,8 @@ import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import org.json.JSONArray
+import org.json.JSONObject
 import android.widget.Toast
 import java.net.URLEncoder
 
@@ -41,6 +44,7 @@ class MainActivity : Activity() {
     @SuppressLint("SetJavaScriptEnabled", "JavascriptInterface")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        if (BuildConfig.E2E) WebView.setWebContentsDebuggingEnabled(true)     // 只有自動測試版開啟（讓測試程式檢查頁面狀態）
         web = WebView(this)
         web.setBackgroundColor(Color.parseColor("#09090F"))
         setContentView(web)
@@ -210,10 +214,53 @@ class MainActivity : Activity() {
             return (n ?: "${Build.MANUFACTURER} ${Build.MODEL}").take(40)
         }
 
+        /** 這台電視能「硬體」解碼的影片格式，例如 "h264,hevc,vp9"（伺服器據此挑原檔或 480p 相容版）。 */
+        @JavascriptInterface
+        fun decoders(): String = Codecs.hardware().joinToString(",")
+
+        /** 裝置資訊（設定頁顯示；回報問題用）。 */
+        @JavascriptInterface
+        fun deviceInfo(): String {
+            val wv = try {
+                if (Build.VERSION.SDK_INT >= 26) WebView.getCurrentWebViewPackage()?.versionName ?: "" else ""
+            } catch (e: Exception) { "" }
+            return JSONObject()
+                .put("model", "${Build.MANUFACTURER} ${Build.MODEL}")
+                .put("android", Build.VERSION.RELEASE)
+                .put("sdk", Build.VERSION.SDK_INT)
+                .put("webview", wv)
+                .put("decoders", JSONArray(Codecs.hardware()))
+                .toString()
+        }
+
         @JavascriptInterface
         fun exitApp() {
             runOnUiThread { finish() }
         }
+    }
+}
+
+/** 偵測硬體解碼器。軟體解碼器（OMX.google.*、c2.android.* 等）不算：電視的 CPU 軟解 AV1／VP9 高畫質會卡頓。
+ *  H.264 一律算支援（所有 Android 電視都有）。 */
+object Codecs {
+    private val MIME = linkedMapOf("video/avc" to "h264", "video/hevc" to "hevc", "video/x-vnd.on2.vp9" to "vp9", "video/av01" to "av1")
+    private var cached: List<String>? = null
+
+    fun hardware(): List<String> {
+        cached?.let { return it }
+        val found = linkedSetOf("h264")
+        try {
+            for (ci in MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos) {
+                if (ci.isEncoder) continue
+                val name = ci.name.lowercase()
+                val software = if (Build.VERSION.SDK_INT >= 29) ci.isSoftwareOnly
+                else name.startsWith("omx.google.") || name.startsWith("c2.android.") || name.contains(".sw.") || name.contains("ffmpeg")
+                if (software) continue
+                for (t in ci.supportedTypes) MIME[t.lowercase()]?.let { found.add(it) }
+            }
+        } catch (_: Exception) {
+        }
+        return found.toList().also { cached = it }
     }
 }
 
