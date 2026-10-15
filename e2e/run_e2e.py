@@ -171,6 +171,75 @@ def color_at(png, fx=0.5, fy=0.28):        # 取在中間文字上方的位置�
     return (name if dist < 70 else "other"), tuple(int(x) for x in c)
 
 
+def ctl_lines():
+    """播放器的控制列顯示／隱藏紀錄（App 每次變化都會寫 log：controller visible=true/false）。"""
+    return [l.split("YTmateTV:")[-1].strip() for l in logcat().splitlines() if "controller visible=" in l]
+
+
+def ctl_hidden_now():
+    ls = ctl_lines()
+    return bool(ls) and "visible=false" in ls[-1]
+
+
+def ctl_shown_now():
+    ls = ctl_lines()
+    return bool(ls) and "visible=true" in ls[-1]
+
+
+def player_log(pat):
+    return [l.split("YTmateTV:")[-1].strip() for l in logcat().splitlines() if re.search(pat, l)]
+
+
+def controller_cases(pg):
+    """使用者回報：在小米電視上用控制列按「下一支」→ 下一支開始播了，但控制列一直不收起來，要按返回才會收。
+    這裡完全照著遙控器操作重現，並檢查各種情況下控制列都會自動收起。
+    模擬器預設關掉動畫；真的電視有動畫（控制列收起／出現有動畫），這段測試打開動畫，跟電視一樣。"""
+    for k in ("animator_duration_scale", "transition_animation_scale", "window_animation_scale"):
+        sh("settings", "put", "global", k, "1")
+    adb("logcat", "-c")
+    pg.ev("setFocus(document.querySelector('.grid.songs .card[data-i=\"0\"]'))")
+    key("KEYCODE_ENTER", 1, 1)
+    top = wait_for(lambda: "PlayerActivity" in resumed(), 15, 1)
+    check("[控制列] 開啟播放器", top)
+    ok = wait_for(ctl_hidden_now, 12, 0.5)
+    check("[控制列] 開始播放後控制列自動收起", ok, " / ".join(ctl_lines())[-300:])
+
+    # 按「上」叫出控制列 → 焦點在播放／暫停 → 按「右」移到「下一支」
+    key("KEYCODE_DPAD_UP", 1, 1.2)
+    check("[控制列] 按「上」叫出控制列", ctl_shown_now(), " / ".join(ctl_lines())[-200:])
+    key("KEYCODE_DPAD_RIGHT", 2, 0.6)                       # 播放／暫停 → 快轉 → 下一支
+    adb("logcat", "-c")
+    key("KEYCODE_ENTER", 1, 0.5)                            # 按下「下一支」
+    ent = player_log(r"key KEYCODE_ENTER")
+    check("[控制列] 焦點在「下一支」按鈕上按確認", ent and "focus=exo_next" in ent[0], ent)
+    moved = wait_for(lambda: player_log(r"transition item=1"), 8, 0.5)
+    check("[控制列] 換到下一支（第 2 支）", moved, " / ".join(player_log("transition|use src"))[-200:])
+    hidden = wait_for(ctl_hidden_now, 9, 0.5)
+    check("[控制列] 按「下一支」後：下一支開始播放，控制列會自動收起（不再一直顯示）",
+          hidden, " / ".join(ctl_lines() + player_log(r"key KEYCODE_ENTER"))[-380:])
+    shot("08_after_next")
+
+    # 暫停 → 控制列保持顯示（正常）；再按確認繼續播放 → 控制列自動收起
+    adb("logcat", "-c")
+    key("KEYCODE_DPAD_CENTER", 1, 1.0)                      # 控制列已收起：確認鍵＝暫停（會叫出控制列）
+    check("[控制列] 確認鍵暫停 → 控制列顯示", ctl_shown_now(), " / ".join(ctl_lines()))
+    time.sleep(5)
+    check("[控制列] 暫停中控制列保持顯示（方便看進度）", ctl_shown_now(), " / ".join(ctl_lines()))
+    adb("logcat", "-c")
+    key("KEYCODE_DPAD_CENTER", 1, 0.5)                      # 焦點在播放鍵：繼續播放
+    hidden = wait_for(ctl_hidden_now, 9, 0.5)
+    check("[控制列] 按確認繼續播放 → 控制列自動收起", hidden, " / ".join(ctl_lines() + player_log("key KEYCODE"))[-300:])
+
+    # 返回頻道頁 → 焦點停在最後播放的那一支（第 2 支）
+    for _ in range(3):
+        key("KEYCODE_BACK", 1, 1.5)
+        if "MainActivity" in resumed():
+            break
+    back = wait_for(lambda: "MainActivity" in resumed(), 10, 1)
+    st = wait_for(lambda: pg.state() if pg.state().get("focusI") == "1" else None, 8, 1)
+    check("[返回] 回到頻道頁、焦點停在最後播放的那一支", back and st, pg.state())
+
+
 def main():
     pg = Page()
     INFO["device"] = sh("getprop", "ro.product.model").strip() + " / Android " + sh("getprop", "ro.build.version.release").strip()
@@ -309,6 +378,7 @@ def main():
         play_case(1, "av1_known", "low", "green", ["low.mp4"], forbid_files=["av1.mp4"])
         play_case(2, "av1_unknown", "low", "green", ["av1b.mp4", "low.mp4"], fallback=True)
     play_case(3, "music", "audio", None, ["audio.mp3"])
+    controller_cases(pg)
 
     # ⑧ 返回鍵：頻道頁 → 首頁 → 連按兩次離開
     key("KEYCODE_BACK", 1, 1.5)

@@ -7,7 +7,7 @@ name: E2E 測試
 
 on:
   push:
-    branches: [main]
+    branches: [main, "dev/**"]
   workflow_dispatch:
 
 permissions:

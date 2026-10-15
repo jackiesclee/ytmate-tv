@@ -135,6 +135,7 @@ class PlayerActivity : Activity() {
         player.addListener(object : Player.Listener {
             override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
                 errorsInRow = 0
+                Log.i(TAG, "transition item=${player.currentMediaItemIndex} reason=$reason")
                 showItem(player.currentMediaItemIndex)
             }
 
@@ -253,6 +254,9 @@ class PlayerActivity : Activity() {
         view.useArtwork = false
         view.keepScreenOn = true
         root.addView(view, FrameLayout.LayoutParams(-1, -1))
+        view.setControllerVisibilityListener(PlayerView.ControllerVisibilityListener { v ->
+            Log.i(TAG, "controller visible=${v == View.VISIBLE} playing=${if (::player.isInitialized) player.isPlaying else false}")
+        })
 
         // 音樂（只有聲音）：模糊背景＋置中縮圖，疊在影片層與控制列之間
         val overlay = view.overlayFrameLayout ?: root
@@ -316,6 +320,7 @@ class PlayerActivity : Activity() {
         val code = event.keyCode
         val controllerShown = view.isControllerFullyVisible
         if (event.action == KeyEvent.ACTION_DOWN) {
+            Log.i(TAG, "key ${KeyEvent.keyCodeToString(code)} shown=$controllerShown focus=${focusName()}")
             when (code) {
                 KeyEvent.KEYCODE_MEDIA_NEXT, KeyEvent.KEYCODE_CHANNEL_DOWN -> { if (player.hasNextMediaItem()) player.seekToNextMediaItem(); return true }
                 KeyEvent.KEYCODE_MEDIA_PREVIOUS, KeyEvent.KEYCODE_CHANNEL_UP -> { player.seekToPreviousMediaItem(); return true }
@@ -341,6 +346,8 @@ class PlayerActivity : Activity() {
         }
         return view.dispatchKeyEvent(event) || super.dispatchKeyEvent(event)
     }
+
+    private fun focusName(): String = try { currentFocus?.let { f -> if (f.id != View.NO_ID) resources.getResourceEntryName(f.id) else f.javaClass.simpleName } ?: "none" } catch (_: Exception) { "?" }
 
     private fun togglePlay() {
         if (player.isPlaying) { player.pause(); view.showController() } else player.play()
