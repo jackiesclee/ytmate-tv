@@ -121,13 +121,15 @@ def home():
     return jsonify({"channels": out, "device_id": "dvtest"})
 
 
-def sources_for(s, dec):
+def sources_for(s, dec, prefer_low=False):
     if not s["file"]:
         return [{"url": "/api/files/audio/audio.mp3", "kind": "audio", "codec": None}]
     orig = {"url": f"/api/files/video/{s['file']}", "kind": "original", "codec": s["codec"]}
     low = {"url": "/api/files/video/low.mp4", "kind": "low", "codec": "h264"}
     aud = {"url": "/api/files/audio/audio.mp3", "kind": "audio", "codec": None}
     ok = s["codec"] is None or s["codec"] in dec
+    if prefer_low and ok:                      # 使用者選了「480p 省流量」
+        return [low, orig, aud]
     return ([orig, low] if ok else [low]) + [aud]
 
 
@@ -136,16 +138,19 @@ def channel(cid):
     if not logged_in():
         return jsonify({"error": "需要登入"}), 401
     dec = {x for x in (request.args.get("dec") or "h264,vp9,av1").split(",") if x} | {"h264"}
-    log("channel", cid=cid, dec=sorted(dec))
+    q = request.args.get("q") or "auto"
+    log("channel", cid=cid, dec=sorted(dec), q=q)
     songs = SONGS if cid == "fmt" else SONGS[:1] * 3
     out = []
     for i, s in enumerate(songs):
-        src = sources_for(s, dec)
+        src = sources_for(s, dec, q == "low")
         out.append({"id": f"s{i}", "video_id": s["video_id"], "title": s["title"], "duration": 12,
-                    "thumb_file": f"/api/files/thumb/{THUMBS[i % 4]}", "subtitles": {}, "sources": src,
+                    "thumb_file": f"/api/files/thumb/{THUMBS[i % 4]}", "sources": src,
+                    # H.264 那支附中英字幕（測試「預設開字幕、英文優先」）
+                    "subtitles": {"zh-Hant": "/api/files/sub/zh.vtt", "en": "/api/files/sub/en.vtt"} if s["video_id"] == "h264" else {},
                     "codec": s["codec"], "need_low": False, "audio_only": src[0]["kind"] == "audio",
                     "note": "這台電視不支援原檔格式（av1），改播 480p 相容版" if src[0]["kind"] == "low" else ""})
-    return jsonify({"id": cid, "name": cid, "songs": out, "decoders": sorted(dec)})
+    return jsonify({"id": cid, "name": cid, "songs": out, "decoders": sorted(dec), "quality": q})
 
 
 @app.route("/api/tv/prepare", methods=["POST"])
@@ -181,6 +186,14 @@ def t_approve():
             log("approved")
             return jsonify({"ok": True})
     return jsonify({"ok": False}), 404
+
+
+@app.route("/test/expire", methods=["POST"])
+def t_expire():
+    """模擬登入過期：清掉所有 session（裝置金鑰仍有效）→ 電視應該自動用金鑰重新登入。"""
+    SESSIONS.clear()
+    log("expired")
+    return jsonify({"ok": True})
 
 
 @app.route("/test/log")

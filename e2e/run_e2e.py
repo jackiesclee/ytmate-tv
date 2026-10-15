@@ -239,6 +239,61 @@ def controller_cases(pg):
     st = wait_for(lambda: pg.state() if pg.state().get("focusI") == "1" else None, 8, 1)
     check("[返回] 回到頻道頁、焦點停在最後播放的那一支", back and st, pg.state())
 
+    # 長影片記住看到哪裡（測試版門檻 20 秒；正式版 5 分鐘以上的影片）
+    def open_card(i):
+        pg.ev(f"setFocus(document.querySelector('.grid.songs .card[data-i=\"{i}\"]'))")
+        key("KEYCODE_ENTER", 1, 1)
+        return wait_for(lambda: "PlayerActivity" in resumed(), 15, 1)
+
+    def leave_player():
+        for _ in range(3):
+            key("KEYCODE_BACK", 1, 1.5)
+            if "MainActivity" in resumed():
+                break
+        return wait_for(lambda: "MainActivity" in resumed(), 10, 1)
+
+    open_card(0)
+    time.sleep(16)
+    adb("logcat", "-c")
+    leave_player()
+    saved = player_log(r"resume save vid=h264 pos=(\d+)")
+    check("[續播] 看到一半離開 → 記住位置", saved, saved)
+    adb("logcat", "-c")
+    open_card(0)
+    time.sleep(3)
+    rs = player_log(r"resume from=(\d+)")
+    pos = int(re.search(r"from=(\d+)", rs[0]).group(1)) if rs else 0
+    check("[續播] 再開同一支 → 從上次的位置繼續（不是從頭）", pos >= 10000, rs)
+    shot("09_resume")
+    leave_player()
+
+    # 設定頁：畫質「480p 省流量」、字幕「中文優先」→ 記住 → 播放照新設定
+    key("KEYCODE_MENU", 1, 1.5)
+    labels = lambda: pg.ev("document.getElementById('qbtn').textContent + ' | ' + document.getElementById('sbtn').textContent")
+    check("[設定] 預設：畫質自動（最佳）、字幕英文優先", labels() == "畫質：自動（最佳） | 字幕：英文優先", labels())
+    pg.ev("setFocus(document.getElementById('qbtn'))")
+    key("KEYCODE_ENTER", 1, 1)
+    pg.ev("setFocus(document.getElementById('sbtn'))")
+    key("KEYCODE_ENTER", 1, 1)
+    check("[設定] 切換成 480p 省流量、中文字幕優先", labels() == "畫質：480p 省流量 | 字幕：中文優先", labels())
+    check("[設定] 設定存在 App 裡", pg.ev("YTmateTV.getPref('quality') + ',' + YTmateTV.getPref('subs')") == "low,zh")
+    n0 = len(srvlog())
+    key("KEYCODE_BACK", 1, 2.5)
+    chq = [x for x in srvlog()[n0:] if x["kind"] == "channel"]
+    check("[設定] 關閉設定 → 頻道用 480p 重新排播放順序（q=low）", chq and chq[-1].get("q") == "low", chq[-1:] if chq else "")
+    badge = pg.ev("document.querySelector('.grid.songs .card[data-i=\"0\"]').innerText")
+    check("[設定] H.264 影片卡片改標 480p", "480p" in (badge or ""), badge)
+    play_case(0, "h264_pref_low", "low", "green", ["low.mp4", "zh.vtt"], forbid_files=["h264.mp4"], expect_sub="zh")
+    # 在播放器字幕選單以外的方式關字幕：設定頁再按兩下（中文 → 關閉 → 英文），回到預設；畫質保留 480p（測試重開 App 後仍記得）
+    key("KEYCODE_MENU", 1, 1.5)
+    pg.ev("setFocus(document.getElementById('sbtn'))")
+    key("KEYCODE_ENTER", 1, 1)
+    check("[設定] 字幕可以關閉", "字幕：關閉" in labels(), labels())
+    key("KEYCODE_ENTER", 1, 1)
+    key("KEYCODE_BACK", 1, 2)
+    for k in ("animator_duration_scale", "transition_animation_scale", "window_animation_scale"):
+        sh("settings", "put", "global", k, "0")
+
 
 def main():
     pg = Page()
@@ -315,6 +370,10 @@ def main():
     shot("04_settings")
     key("KEYCODE_BACK", 1, 1.5)
     check("返回鍵關閉設定頁", not pg.ev("document.getElementById('settings').className.indexOf('on')>=0"))
+    key("KEYCODE_MENU", 1, 1.5)
+    check("遙控器「選單」鍵 → 開啟設定", pg.ev("document.getElementById('settings').className.indexOf('on')>=0"))
+    key("KEYCODE_MENU", 1, 1.5)
+    check("再按「選單」鍵 → 關閉設定", not pg.ev("document.getElementById('settings').className.indexOf('on')>=0"))
 
     # ⑥ 進入「格式測試」頻道
     key("KEYCODE_DPAD_DOWN", 1)
@@ -330,7 +389,7 @@ def main():
     shot("05_channel")
 
     # ⑦ 播放測試
-    def play_case(idx, label, expect_kind, expect_color, expect_files, forbid_files=(), fallback=False):
+    def play_case(idx, label, expect_kind, expect_color, expect_files, forbid_files=(), fallback=False, expect_sub=None):
         adb("logcat", "-c")
         n0 = len(srvlog())
         pg.ev(f"setFocus(document.querySelector('.grid.songs .card[data-i=\"{idx}\"]'))")
@@ -360,6 +419,9 @@ def main():
             fb = [l.split("YTmateTV:")[-1].strip() for l in lc.splitlines() if f"item={idx}" in l and ("fallback" in l or "tracks" in l)]
             check(f"[{label}] App 偵測到畫面解不了 → 自動改用 480p（而且沒有再誤判掉到純聲音）",
                   any("-> low" in l for l in fb) and not any("-> audio" in l for l in fb), " / ".join(fb)[:380])
+        if expect_sub:
+            subl = [l.split("YTmateTV:")[-1].strip() for l in lc.splitlines() if f"subtitle item={idx}" in l]
+            check(f"[{label}] 預設自動開字幕：{ {'en': '英文', 'zh': '中文'}[expect_sub] }", subl and f"selected={expect_sub}" in subl[-1], subl[-2:])
         p = shot(f"06_play_{label}")
         if expect_color:
             col, rgb = color_at(p)
@@ -371,7 +433,7 @@ def main():
         back = wait_for(lambda: "MainActivity" in resumed(), 10, 1)
         check(f"[{label}] 返回鍵回到頻道頁", back and pg.state().get("view") == "channel", pg.state().get("view"))
 
-    play_case(0, "h264", "original", "blue", ["h264.mp4"])
+    play_case(0, "h264", "original", "blue", ["h264.mp4", "en.vtt"], expect_sub="en")
     if av1_hw:
         play_case(1, "av1_known", "original", None, ["av1.mp4"])
     else:
@@ -383,6 +445,19 @@ def main():
     # ⑧ 返回鍵：頻道頁 → 首頁 → 連按兩次離開
     key("KEYCODE_BACK", 1, 1.5)
     check("頻道頁按返回 → 回到首頁、停在原本的頻道", pg.state().get("view") == "home" and pg.state().get("focusId") == "fmt", pg.state())
+
+    # ⑧b 登入過期（伺服器 session 清掉、裝置金鑰仍有效）→ App 自動用金鑰重新登入，不用重新配對
+    n_login = len([x for x in srvlog() if x["kind"] == "login_ok"])
+    n_pair = len([x for x in srvlog() if x["kind"] == "pair_start"])
+    urllib.request.urlopen(urllib.request.Request(SRV + "/test/expire", method="POST"), timeout=10)
+    pg.ev("openChannel('fmt')")
+    relog = wait_for(lambda: len([x for x in srvlog() if x["kind"] == "login_ok"]) > n_login, 30, 1)
+    time.sleep(3)
+    pg.connect("/tv")
+    st = wait_for(lambda: pg.state() if pg.state().get("view") == "home" else None, 30, 1)
+    check("登入過期 → 自動用裝置金鑰重新登入、回到首頁（不用重新配對）",
+          relog and st and len([x for x in srvlog() if x["kind"] == "pair_start"]) == n_pair, st)
+
     key("KEYCODE_BACK", 1, 0.4)
     key("KEYCODE_BACK", 1, 2)
     gone = PKG not in resumed()
@@ -396,6 +471,8 @@ def main():
     check("重新開啟 App → 自動登入（不用重新配對）", again and len([x for x in srvlog() if x["kind"] == "pair_start"]) == n_pair)
     time.sleep(4)
     shot("07_reopen")
+    pg.connect("/tv")
+    check("重新開啟 App → 畫質設定（480p）仍記得", pg.ev("getPref('quality')") == "low", pg.ev("getPref('quality')"))
 
 
 try:

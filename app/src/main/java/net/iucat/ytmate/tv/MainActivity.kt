@@ -33,11 +33,14 @@ import java.net.URLEncoder
  * - 按「播放」時頁面呼叫 YTmateTV.play(json)，交給原生播放器 PlayerActivity（ExoPlayer）。
  * - 返回鍵：先問頁面 window.tvBack()（關視窗、回首頁）；已在首頁時連按兩次才離開。
  * - 安全：WebView 只允許開本服務的網域，其他網址一律擋掉（JS 橋接不會暴露給別的網站）。
+ * - 2026-10-15：選單鍵＝開／關設定；從播放器回來時焦點停在最後播放的那一支（window.tvAfterPlay）；
+ *   登入過期（頁面收到 401）時先用裝置金鑰自動重新登入（YTmateTV.relogin()），失效了才回配對畫面。
  */
 class MainActivity : Activity() {
 
     private lateinit var web: WebView
     private var lastBack = 0L
+    @Volatile private var lastRelogin = 0L
     private val base = BuildConfig.BASE_URL
     private val baseHost: String = Uri.parse(BuildConfig.BASE_URL).host ?: ""
 
@@ -123,6 +126,10 @@ class MainActivity : Activity() {
             if (event.action == KeyEvent.ACTION_UP) handleBack()
             return true
         }
+        if (event.keyCode == KeyEvent.KEYCODE_MENU) {       // 選單鍵（很多電視遙控器都有「≡」）→ 開／關設定
+            if (event.action == KeyEvent.ACTION_UP) web.evaluateJavascript("window.tvMenu && window.tvMenu()", null)
+            return true
+        }
         return super.dispatchKeyEvent(event)
     }
 
@@ -149,6 +156,11 @@ class MainActivity : Activity() {
         super.onResume()
         web.onResume()
         hideSystemUi()
+        web.requestFocus()                                    // 從播放器回來：遙控器按鍵一定送到頁面
+        PlayerActivity.lastVideoId?.let { vid ->              // 焦點移到最後播放的那一支
+            PlayerActivity.lastVideoId = null
+            web.evaluateJavascript("window.tvAfterPlay && window.tvAfterPlay(${JSONObject.quote(vid)})", null)
+        }
     }
 
     override fun onPause() {
@@ -195,6 +207,23 @@ class MainActivity : Activity() {
             PlayerActivity.pending = json
             runOnUiThread { startActivity(Intent(this@MainActivity, PlayerActivity::class.java)) }
         }
+
+        /** 頁面收到 401（登入過期）→ 用裝置金鑰重新登入。回傳 false＝沒有金鑰或 30 秒內已試過（頁面改去配對畫面）。 */
+        @JavascriptInterface
+        fun relogin(): Boolean {
+            val now = System.currentTimeMillis()
+            if (Prefs.token(this@MainActivity).isNullOrEmpty() || now - lastRelogin < 30_000) return false
+            lastRelogin = now
+            runOnUiThread { start() }
+            return true
+        }
+
+        /** 使用者設定（畫質 quality：auto／low；字幕 subs：en／zh／off）：存在 App 裡，一直記住直到再改。 */
+        @JavascriptInterface
+        fun getPref(key: String): String = Prefs.get(this@MainActivity, key)
+
+        @JavascriptInterface
+        fun setPref(key: String, value: String) = Prefs.set(this@MainActivity, key, value)
 
         @JavascriptInterface
         fun retry() {
@@ -277,5 +306,18 @@ object Prefs {
 
     fun clear(ctx: Context) {
         ctx.getSharedPreferences(FILE, Context.MODE_PRIVATE).edit().remove(KEY).apply()
+    }
+
+    // 使用者設定：只接受這幾個鍵與值（頁面不能拿這個存任意資料；取消配對也不會清掉）
+    private val ALLOWED = mapOf("quality" to setOf("auto", "low"), "subs" to setOf("en", "zh", "off"))
+
+    fun get(ctx: Context, key: String): String {
+        if (key !in ALLOWED) return ""
+        return ctx.getSharedPreferences(FILE, Context.MODE_PRIVATE).getString("pref_$key", "") ?: ""
+    }
+
+    fun set(ctx: Context, key: String, value: String) {
+        if (ALLOWED[key]?.contains(value) != true) return
+        ctx.getSharedPreferences(FILE, Context.MODE_PRIVATE).edit().putString("pref_$key", value).apply()
     }
 }

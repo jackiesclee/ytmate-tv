@@ -76,6 +76,7 @@ dependencies {
     implementation("androidx.media3:media3-exoplayer:$media3")
     implementation("androidx.media3:media3-ui:$media3")
     implementation("androidx.media3:media3-datasource:$media3")
+    implementation("androidx.media3:media3-session:$media3")     // 媒體工作階段：系統／遙控器媒體鍵、Google 助理「暫停」
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("androidx.annotation:annotation:1.8.2")
 }

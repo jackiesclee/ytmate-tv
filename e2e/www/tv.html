@@ -114,6 +114,8 @@ body{font-size:1.2vw}
   <div class="r">網頁核心：<b id="wv"></b></div>
   <div class="r">可硬體解碼：<b id="decs"></b></div>
   <div class="r" style="font-size:1vw">原檔格式這台電視解不了時，會自動改播 480p 相容版。</div>
+  <div class="btns"><div class="btn f" data-act="quality" id="qbtn"></div><div class="btn f" data-act="subs" id="sbtn"></div></div>
+  <div class="r" style="font-size:1vw">按確認鍵切換；設定會一直記住，直到你再改。</div>
   <div class="btns"><div class="btn f" data-act="reload">↻ 重新整理</div><div class="btn f" data-act="unpair">⏏ 取消這台電視的配對</div><div class="btn f" data-act="close">返回</div></div>
 </div></div>
 <div id="player" class="fill"><video id="pv"></video><div id="paudio"><img id="pimg" alt=""></div>
@@ -129,6 +131,20 @@ var CHROME = (function () { var m = navigator.userAgent.match(/Chrome\/(\d+)/); 
 if (CHROME && CHROME < 80) document.documentElement.className += ' lite';
 function nativeCall(name) { try { return NATIVE && NATIVE[name] ? NATIVE[name]() : ''; } catch (e) { return ''; } }
 var DECODERS = nativeCall('decoders');          // App 回報這台電視能硬體解碼的格式，例如 "h264,hevc,vp9"
+// 使用者設定（存在 App 裡，一直記住直到再改；瀏覽器裡存在 localStorage）
+//   quality：auto＝最佳畫質（依電視能力）、low＝480p 省流量（任何電視都能選）
+//   subs：en＝英文字幕優先（預設）、zh＝中文優先、off＝不顯示字幕
+var PREF_DEFAULT = { quality: 'auto', subs: 'en' };
+function getPref(k) {
+  var v = '';
+  try { v = NATIVE && NATIVE.getPref ? NATIVE.getPref(k) : (window.localStorage.getItem('ytmate_' + k) || ''); } catch (e) {}
+  return v || PREF_DEFAULT[k];
+}
+function setPref(k, v) {
+  try { if (NATIVE && NATIVE.setPref) NATIVE.setPref(k, v); else window.localStorage.setItem('ytmate_' + k, v); } catch (e) {}
+}
+var Q_LABEL = { auto: '畫質：自動（最佳）', low: '畫質：480p 省流量' };
+var S_LABEL = { en: '字幕：英文優先', zh: '字幕：中文優先', off: '字幕：關閉' };
 
 function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
 function abs(u) { return u ? (u.indexOf('http') === 0 ? u : location.protocol + '//' + location.host + u) : ''; }
@@ -137,7 +153,11 @@ function fmtDur(s) { s = Math.max(0, Math.floor(s || 0)); var h = Math.floor(s /
 function toast(msg, ms) { var t = $('toast'); t.textContent = msg; t.className = 'toast on'; clearTimeout(toast._t); toast._t = setTimeout(function () { t.className = 'toast'; }, ms || 2600); }
 function api(url, opt) {
   return fetch(url, opt || { credentials: 'same-origin' }).then(function (r) {
-    if (r.status === 401) { location.href = '/tv/pair'; throw new Error('需要重新配對'); }
+    if (r.status === 401) {                     // 登入過期：App 先用裝置金鑰自動重新登入；不行才回配對畫面
+      var re = false; try { re = !!(NATIVE && NATIVE.relogin && NATIVE.relogin()); } catch (e) {}
+      if (!re) location.href = '/tv/pair';
+      throw new Error(re ? '重新登入中…' : '需要重新配對');
+    }
     return r.json().then(function (j) { if (!r.ok || j.error) throw new Error(j.error || ('HTTP ' + r.status)); return j; });
   });
 }
@@ -197,6 +217,7 @@ function keyName(e) {
   if (k === 'MediaPlayPause' || k === ' ' || c === 32 || c === 179) return 'PLAY';
   if (k === 'MediaTrackNext' || c === 176) return 'NEXT';
   if (k === 'MediaTrackPrevious' || c === 177) return 'PREV';
+  if (k === 'ContextMenu' || c === 82 || c === 93) return 'MENU';
   return '';
 }
 document.addEventListener('keydown', function (e) {
@@ -206,6 +227,7 @@ document.addEventListener('keydown', function (e) {
   if (k === 'L' || k === 'R' || k === 'U' || k === 'D') move(k);
   else if (k === 'OK') activate(S.focusEl);
   else if (k === 'BACK') { if (!window.tvBack() && !NATIVE) toast('已經在首頁'); }
+  else if (k === 'MENU') window.tvMenu();
 });
 document.addEventListener('click', function (e) { var el = closestF(e.target); if (el) { setFocus(el, true); activate(el); } });
 
@@ -215,6 +237,17 @@ window.tvBack = function () {
   if ($('settings').className.indexOf('on') >= 0) { closeSettings(); return true; }
   if (S.view === 'channel') { renderHome(); return true; }
   return false;
+};
+// 選單鍵：開／關設定（App 攔下遙控器的選單鍵後呼叫這個）
+window.tvMenu = function () {
+  if ($('player').className.indexOf('on') >= 0) return true;
+  if ($('settings').className.indexOf('on') >= 0) closeSettings(); else openSettings();
+  return true;
+};
+// 從原生播放器回來時 App 會呼叫這個：重新整理頻道（480p 相容版可能剛轉好）、焦點停在最後播放的那一支
+window.tvAfterPlay = function (vid) {
+  if (S.view === 'channel' && S.channel && vid) openChannel(S.channel.id, vid, true);
+  return true;
 };
 // 給自動測試讀目前狀態（不影響使用）
 window.tvState = function () { return JSON.stringify({ view: S.view, focusAct: S.focusEl && S.focusEl.getAttribute('data-act'), focusId: S.focusEl && S.focusEl.getAttribute('data-id'),
@@ -231,6 +264,8 @@ function activate(el) {
   else if (act === 'close') closeSettings();
   else if (act === 'reload') location.reload();
   else if (act === 'unpair') unpair();
+  else if (act === 'quality') { setPref('quality', getPref('quality') === 'low' ? 'auto' : 'low'); prefLabels(); S.prefChanged = true; toast(Q_LABEL[getPref('quality')]); }
+  else if (act === 'subs') { var o = ['en', 'zh', 'off'], c = getPref('subs'); setPref('subs', o[(o.indexOf(c) + 1) % 3]); prefLabels(); toast(S_LABEL[getPref('subs')]); }
 }
 
 // ══ 首頁：每個頻道一張大卡片 ══
@@ -269,10 +304,13 @@ function loadHome() {
 }
 
 // ══ 頻道頁：影片卡片（伺服器依這台電視的解碼能力排好每支影片的播放順序）══
-function openChannel(id) {
-  $('loading').style.display = 'block';
+function openChannel(id, focusVid, quiet) {
+  if (!quiet) $('loading').style.display = 'block';
   var c = S.channels.filter(function (x) { return x.id === id; })[0] || { id: id, name: '', song_count: 0 };
-  api('/api/tv/channel/' + encodeURIComponent(id) + (DECODERS ? '?dec=' + encodeURIComponent(DECODERS) : '')).then(function (j) {
+  var qs = [];
+  if (DECODERS) qs.push('dec=' + encodeURIComponent(DECODERS));
+  if (getPref('quality') === 'low') qs.push('q=low');
+  api('/api/tv/channel/' + encodeURIComponent(id) + (qs.length ? '?' + qs.join('&') : '')).then(function (j) {
     S.view = 'channel'; S.channel = c; S.songs = j.songs || [];
     var playable = S.songs.filter(function (s) { return s.sources && s.sources.length; });
     S.playable = playable;
@@ -285,7 +323,7 @@ function openChannel(id) {
       var ok = s.sources && s.sources.length, pi = ok ? playable.indexOf(s) : -1, first = ok ? s.sources[0].kind : '';
       var badge = !ok ? '<div class="badge gray">尚未下載</div>' : s.audio_only ? '<div class="badge">🎵 音樂</div>' :
         first === 'low' ? '<div class="badge compat">480p</div>' : s.need_low ? '<div class="badge gray">轉檔中</div>' : '';
-      return '<div class="card f' + (ok ? '' : ' dim') + '" data-act="song" data-i="' + pi + '">' +
+      return '<div class="card f' + (ok ? '' : ' dim') + '" data-act="song" data-i="' + pi + '" data-vid="' + esc(s.video_id) + '">' +
         '<div class="art" style="' + grad(i) + '">' + (s.thumb_file ? '<img src="' + esc(s.thumb_file) + '" alt="">' : '<div class="ph">♪</div>') +
         (s.duration ? '<div class="dur">' + fmtDur(s.duration) + '</div>' : '') + badge + '</div>' +
         '<div class="t">' + esc(s.title || s.video_id) + '</div></div>';
@@ -293,24 +331,32 @@ function openChannel(id) {
     $('view').innerHTML = h; $('scroller').scrollTop = 0;
     var bg = c.cover || (S.songs[0] && S.songs[0].thumb_file);
     $('bgart').style.backgroundImage = bg ? 'url("' + bg + '")' : 'none';
-    var pa = document.querySelector('.btn[data-act="playall"]');
-    setFocus(playable.length ? pa : (document.querySelector('.grid .card') || pa));
-  }).catch(function (e) { toast('載入失敗：' + e.message); }).then(function () { $('loading').style.display = 'none'; });
+    var pa = document.querySelector('.btn[data-act="playall"]'), last = null;
+    if (focusVid) { var cs = document.querySelectorAll('.grid.songs .card'); for (var q = 0; q < cs.length; q++) if (cs[q].getAttribute('data-vid') === focusVid) last = cs[q]; }
+    setFocus(last || (playable.length ? pa : (document.querySelector('.grid .card') || pa)));
+  }).catch(function (e) { if (!quiet) toast('載入失敗：' + e.message); }).then(function () { $('loading').style.display = 'none'; });
 }
 
 // ══ 播放：App 裡交給原生播放器（每支附多個版本，畫面解不了會自動換下一個）；瀏覽器裡用備用播放器 ══
-function pickSub(subs) {
-  var keys = ['zh-Hant', 'zh-TW', 'zh-Hant-ai', 'zh', 'en', 'en-ai'];
-  for (var i = 0; i < keys.length; i++) if (subs && subs[keys[i]]) return { lang: keys[i], url: abs(subs[keys[i]]) };
-  return null;
+// 字幕：每種語言挑一個（英文：en → en-ai；中文：zh-Hant → zh-TW → zh-Hant-ai → zh），依使用者設定排順序
+var SUB_KEYS = { en: ['en', 'en-ai'], zh: ['zh-Hant', 'zh-TW', 'zh-Hant-ai', 'zh'] };
+function subList(subs) {
+  var pref = getPref('subs'), order = pref === 'zh' ? ['zh', 'en'] : ['en', 'zh'], out = [];
+  for (var g = 0; g < order.length; g++) {
+    var ks = SUB_KEYS[order[g]];
+    for (var i = 0; i < ks.length; i++) if (subs && subs[ks[i]]) { out.push({ lang: ks[i], url: abs(subs[ks[i]]) }); break; }
+  }
+  return out;
 }
+function pickSub(subs) { var l = subList(subs); return l.length ? l[0] : null; }   // 舊版 App 只認一個字幕
 function playFrom(i, shuffle) {
   var list = S.playable.slice();
   if (i < 0 || !list.length) { toast('這支影片還沒有下載到伺服器，無法播放'); return; }
   var items = list.map(function (s) {
     var srcs = s.sources.map(function (x) { return { url: abs(x.url), kind: x.kind, codec: x.codec || '' }; });
     return { url: srcs[0].url, audio: srcs[0].kind === 'audio', sources: srcs, note: s.note || '', video_id: s.video_id,
-      title: s.title || s.video_id, artist: S.channel ? S.channel.name : '', thumb: abs(s.thumb_file), duration: s.duration || 0, sub: pickSub(s.subtitles) };
+      title: s.title || s.video_id, artist: S.channel ? S.channel.name : '', thumb: abs(s.thumb_file), duration: s.duration || 0,
+      sub: pickSub(s.subtitles), subs: subList(s.subtitles), subPref: getPref('subs') };
   });
   if (shuffle) { for (var k = items.length - 1; k > 0; k--) { var r = Math.floor(Math.random() * (k + 1)), t = items[k]; items[k] = items[r]; items[r] = t; } i = 0; }
   // 這台電視需要 480p 但還沒轉好的（目前這支＋接下來 2 支）→ 請伺服器在背景轉檔
@@ -362,9 +408,16 @@ function openSettings() {
   $('model').textContent = info.model ? info.model + '（Android ' + info.android + '）' : navigator.platform;
   $('wv').textContent = CHROME ? 'Chrome ' + CHROME + (document.documentElement.className.indexOf('lite') >= 0 ? '（舊版，已開啟輕量模式）' : '') : navigator.userAgent.slice(0, 60);
   $('decs').textContent = DECODERS ? DECODERS.toUpperCase().split(',').join('、') : '（瀏覽器）';
+  prefLabels(); S.prefChanged = false;
   S.prevFocus = S.focusEl; $('settings').className = 'fill on'; setFocus($('settings').querySelector('.btn'), true);
 }
-function closeSettings() { $('settings').className = 'fill'; setFocus(S.prevFocus || $('gear'), true); }
+function prefLabels() { $('qbtn').textContent = Q_LABEL[getPref('quality')] || Q_LABEL.auto; $('sbtn').textContent = S_LABEL[getPref('subs')] || S_LABEL.en; }
+function closeSettings() {
+  $('settings').className = 'fill'; setFocus(S.prevFocus || $('gear'), true);
+  // 改了畫質而且正在頻道頁 → 重新載入這個頻道（套用新的播放順序），焦點留在原本那一支
+  if (S.prefChanged && S.view === 'channel' && S.channel) { var fv = S.focusEl && S.focusEl.getAttribute('data-vid'); openChannel(S.channel.id, fv, true); }
+  S.prefChanged = false;
+}
 var unpairArmed = 0;
 function unpair() {
   if (Date.now() - unpairArmed > 4000) { unpairArmed = Date.now(); toast('再按一次確認鍵，取消這台電視的配對', 4000); return; }   // 不用 confirm()：舊電視的對話框常常不好按
