@@ -214,10 +214,10 @@ def controller_cases(pg):
     # 按「上」叫出控制列 → 焦點在播放／暫停 → 按「右」移到「下一支」
     key("KEYCODE_DPAD_UP", 1, 1.2)
     check("[控制列] 按「上」叫出控制列", ctl_shown_now(), " / ".join(ctl_lines())[-200:])
-    key("KEYCODE_DPAD_RIGHT", 2, 0.6)                       # 播放／暫停 → 快轉 → 下一支
-    adb("logcat", "-c")
-    key("KEYCODE_ENTER", 1, 0.5)                            # 按下「下一支」
-    ent = player_log(r"key KEYCODE_ENTER")
+    n_before = len(logcat().splitlines())
+    key("KEYCODE_DPAD_RIGHT", 2, 0.4)                       # 播放／暫停 → 快轉 → 下一支
+    key("KEYCODE_ENTER", 1, 0.5)                            # 馬上按下「下一支」（控制列 3.5 秒沒操作就會收起）
+    ent = [l.split("YTmateTV:")[-1].strip() for l in logcat().splitlines()[n_before:] if "key KEYCODE_ENTER" in l]
     check("[控制列] 焦點在「下一支」按鈕上按確認", ent and "focus=exo_next" in ent[0], ent)
     moved = wait_for(lambda: player_log(r"transition item=1"), 8, 0.5)
     check("[控制列] 換到下一支（第 2 支）", moved, " / ".join(player_log("transition|use src"))[-200:])
