@@ -106,7 +106,21 @@ class Page:
         self.ws, self.n = None, 0
 
     def connect(self, url_part):
-        # 先關掉舊連線：DevTools 在頁面已經有人連著時，不會給出 webSocketDebuggerUrl
+        # 同一個 WebView 換頁後，DevTools 連線仍然有效：能用就沿用（重新連線在舊版 WebView 上不穩定）
+        if self.ws:
+            try:
+                href = self.ev("location.href") or ""
+                if url_part in href:
+                    return href
+                t0 = time.time()
+                while time.time() - t0 < 30:
+                    time.sleep(1)
+                    href = self.ev("location.href") or ""
+                    if url_part in href:
+                        return href
+            except Exception:
+                pass
+        # 連線斷了才重新連（先關掉舊連線：頁面已經有人連著時，DevTools 不會給出 webSocketDebuggerUrl）
         if self.ws:
             try:
                 self.ws.close()
@@ -147,7 +161,7 @@ class Page:
 REF = {"blue": (29, 78, 216), "red": (185, 28, 28), "green": (21, 128, 61)}
 
 
-def color_at(png, fx=0.15, fy=0.45):
+def color_at(png, fx=0.5, fy=0.28):        # 取在中間文字上方的位置（避開白色字）
     """取畫面某一點的顏色，跟三支測試影片的底色比對；都不像（例如音樂封面、黑畫面）就回傳 other。"""
     im = Image.open(png).convert("RGB")
     w, h = im.size
@@ -254,7 +268,7 @@ def main():
         key("KEYCODE_ENTER", 1, 1)
         top = wait_for(lambda: "PlayerActivity" in resumed(), 15, 1)
         check(f"[{label}] 開啟原生播放器", top)
-        time.sleep(14 if fallback else 9)          # 控制列 3.5 秒後自動隱藏，截圖時畫面不會被蓋住
+        time.sleep(10 if fallback else 8)          # 控制列 3.5 秒後自動隱藏；測試影片 40 秒，截圖時還在同一支
         lc = logcat()
         with open(os.path.join(args.out, f"{args.label}_play_{label}_logcat.txt"), "w", encoding="utf-8") as f:
             f.write(lc)
