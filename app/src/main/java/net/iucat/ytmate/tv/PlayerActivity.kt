@@ -52,7 +52,7 @@ import kotlin.concurrent.thread
  *
  * 遙控器：
  *   確認鍵＝暫停／播放（控制列隱藏時）；左右＝倒轉／快轉 10 秒（按住不放會加速：30 秒、60 秒）；
- *   上下＝顯示控制列（可選上一支／下一支、字幕）；媒體鍵／頻道上下＝上一支／下一支；
+ *   上＝顯示控制列（可選上一支／下一支、字幕）；下＝字幕開／關；媒體鍵／頻道上下＝上一支／下一支；
  *   返回＝先收起控制列，再按一次回到頻道頁。
  * 媒體檔需要登入：沿用 WebView 的 session cookie 送出請求。
  * 只有聲音的項目（音樂）顯示縮圖＋標題；每支開始播放時左上角顯示標題 4 秒。播完整個清單自動回到頻道頁。
@@ -70,6 +70,11 @@ import kotlin.concurrent.thread
  *   - 長影片記住看到哪裡，下次從那裡繼續。
  *   - 控制列出現時一併顯示標題；回到頻道頁時焦點停在最後播放的那一支。
  *   - 字幕預設自動開啟、英文優先（沒有英文就中文）；在設定頁或播放器的字幕選單改過之後，一直照新的設定（記在 App 裡）。
+ *
+ * 2026-10-16：
+ *   - 控制列收起時按「下」＝字幕開／關（記住設定；再打開時回到上次的語言）。
+ *   - 按左右快轉／倒轉時，畫面下方顯示時間軸（目前時間／總長度／這次跳了多少）；
+ *     放開按鍵、恢復正常播放後時間軸自動消失。
  */
 @OptIn(UnstableApi::class)
 class PlayerActivity : Activity() {
@@ -111,6 +116,20 @@ class PlayerActivity : Activity() {
     private var lastKeyAt = 0L
     private var playingSince = 0L
     private var consumedKey = 0
+    // 快轉／倒轉時的時間軸
+    private lateinit var seekBox: LinearLayout
+    private lateinit var seekTrack: FrameLayout
+    private lateinit var seekBuffered: View
+    private lateinit var seekPlayed: View
+    private lateinit var seekThumb: View
+    private lateinit var seekTime: TextView
+    private lateinit var seekDur: TextView
+    private lateinit var seekDeltaText: TextView
+    private lateinit var osd: TextView
+    private var seekShown = false
+    private var seekReleasedAt = 0L                  // 0＝還按著
+    private var seekAccum = 0L                       // 這次按住累積跳了多少
+    private var seekTarget = -1L
     private var controllerVisible = false
     private var curIdx = -1                          // 目前這支（記錄播放位置用）
     private var curPos = 0L
@@ -495,7 +514,130 @@ class PlayerActivity : Activity() {
         subText = TextView(this).apply { setTextColor(Color.parseColor("#C8C8D8")); textSize = 14f }
         titleBox.addView(titleText); titleBox.addView(subText)
         overlay.addView(titleBox, FrameLayout.LayoutParams(-1, -2, Gravity.TOP))
+
+        // 快轉／倒轉的時間軸（畫面下方；控制列收起時才會出現）
+        seekBox = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(48f), dp(40f), dp(48f), dp(28f))
+            background = GradientDrawable(GradientDrawable.Orientation.BOTTOM_TOP, intArrayOf(Color.parseColor("#D9000000"), Color.TRANSPARENT))
+            visibility = View.GONE
+        }
+        seekDeltaText = TextView(this).apply {
+            setTextColor(Color.WHITE); textSize = 20f; typeface = Typeface.DEFAULT_BOLD; gravity = Gravity.CENTER
+        }
+        seekBox.addView(seekDeltaText, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(10f) })
+        seekTrack = FrameLayout(this).apply {
+            background = GradientDrawable().apply { cornerRadius = dp(3f).toFloat(); setColor(Color.parseColor("#55FFFFFF")) }
+        }
+        seekBuffered = View(this).apply { background = GradientDrawable().apply { cornerRadius = dp(3f).toFloat(); setColor(Color.parseColor("#88FFFFFF")) } }
+        seekPlayed = View(this).apply { background = GradientDrawable().apply { cornerRadius = dp(3f).toFloat(); setColor(Color.parseColor("#EC4899")) } }
+        seekTrack.addView(seekBuffered, FrameLayout.LayoutParams(0, -1))
+        seekTrack.addView(seekPlayed, FrameLayout.LayoutParams(0, -1))
+        val trackWrap = FrameLayout(this)
+        trackWrap.addView(seekTrack, FrameLayout.LayoutParams(-1, dp(6f), Gravity.CENTER_VERTICAL))
+        seekThumb = View(this).apply { background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(Color.WHITE) } }
+        trackWrap.addView(seekThumb, FrameLayout.LayoutParams(dp(16f), dp(16f), Gravity.CENTER_VERTICAL))
+        seekBox.addView(trackWrap, LinearLayout.LayoutParams(-1, dp(18f)))
+        val times = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        seekTime = TextView(this).apply { setTextColor(Color.WHITE); textSize = 15f; typeface = Typeface.DEFAULT_BOLD }
+        seekDur = TextView(this).apply { setTextColor(Color.parseColor("#C8C8D8")); textSize = 15f; gravity = Gravity.END }
+        times.addView(seekTime, LinearLayout.LayoutParams(0, -2, 1f))
+        times.addView(seekDur, LinearLayout.LayoutParams(0, -2, 1f))
+        seekBox.addView(times, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(6f) })
+        overlay.addView(seekBox, FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM))
+
+        // 畫面上方中間的短提示（字幕開關等）
+        osd = TextView(this).apply {
+            setTextColor(Color.WHITE); textSize = 18f; typeface = Typeface.DEFAULT_BOLD
+            setPadding(dp(22f), dp(10f), dp(22f), dp(10f))
+            background = GradientDrawable().apply { cornerRadius = dp(24f).toFloat(); setColor(Color.parseColor("#CC17172A")) }
+            visibility = View.GONE
+        }
+        overlay.addView(osd, FrameLayout.LayoutParams(-2, -2, Gravity.TOP or Gravity.CENTER_HORIZONTAL).apply { topMargin = dp(36f) })
         setContentView(root)
+    }
+
+    private val hideOsd = Runnable { osd.visibility = View.GONE }
+
+    private fun showOsd(text: String) {
+        osd.text = text
+        osd.visibility = View.VISIBLE
+        ui.removeCallbacks(hideOsd)
+        ui.postDelayed(hideOsd, 2000)
+    }
+
+    /** 控制列收起時按「下」：字幕開／關（記住設定；再打開時用上次的語言）。 */
+    private fun toggleSubtitles() {
+        val i = player.currentMediaItemIndex
+        val it = items.getOrNull(i) ?: return
+        if (it.subs.isEmpty() || isAudio(i)) {
+            Log.i(TAG, "subtitle toggle: none available")
+            showOsd("這支影片沒有字幕"); return
+        }
+        if (subPref == "off") {
+            subPref = Prefs.get(this, "subs_last").ifEmpty { "en" }
+        } else {
+            Prefs.set(this, "subs_last", subPref)
+            subPref = "off"
+        }
+        Prefs.set(this, "subs", subPref)
+        applySubPref()
+        Log.i(TAG, "subtitle toggle -> $subPref saved=${Prefs.get(this, "subs")}")
+        showOsd(when (subPref) { "off" -> "字幕：關閉"; "zh" -> "字幕：中文"; else -> "字幕：English" })
+    }
+
+    /** 快轉／倒轉時顯示時間軸；放開按鍵、恢復正常播放後自動消失。 */
+    private fun showSeekBar(target: Long, delta: Long) {
+        if (!seekShown) {
+            seekShown = true
+            seekAccum = 0L
+            seekBox.visibility = View.VISIBLE
+            Log.i(TAG, "seekbar visible=true")
+        }
+        seekAccum += delta
+        seekTarget = target
+        seekReleasedAt = 0L
+        val sign = if (seekAccum >= 0) "+" else "−"
+        seekDeltaText.text = (if (seekAccum >= 0) "⏩ " else "⏪ ") + sign + fmt(kotlin.math.abs(seekAccum) / 1000)
+        updateSeekBar(target)
+        ui.removeCallbacks(seekTick)
+        ui.postDelayed(seekTick, 250)
+    }
+
+    private fun updateSeekBar(posMs: Long = player.currentPosition) {
+        val dur = player.duration.takeIf { d -> d > 0 } ?: items.getOrNull(player.currentMediaItemIndex)?.durMs ?: 0L
+        seekTime.text = fmt(posMs.coerceAtLeast(0L) / 1000)
+        seekDur.text = if (dur > 0) fmt(dur / 1000) else "--:--"
+        val w = seekTrack.width
+        if (w <= 0 || dur <= 0) { seekTrack.post { if (seekShown) updateSeekBar(posMs) }; return }
+        val played = (w * (posMs.toDouble() / dur)).toInt().coerceIn(0, w)
+        val buffered = (w * (player.bufferedPosition.toDouble() / dur)).toInt().coerceIn(played, w)
+        seekPlayed.layoutParams = (seekPlayed.layoutParams as FrameLayout.LayoutParams).apply { width = played }
+        seekBuffered.layoutParams = (seekBuffered.layoutParams as FrameLayout.LayoutParams).apply { width = buffered }
+        seekThumb.translationX = (played - dp(8f)).toFloat().coerceAtLeast(0f)
+        seekPlayed.requestLayout()
+    }
+
+    private fun hideSeekBar() {
+        ui.removeCallbacks(seekTick)
+        if (!seekShown) return
+        seekShown = false
+        seekBox.visibility = View.GONE
+        seekReleasedAt = 0L
+        Log.i(TAG, "seekbar visible=false")
+    }
+
+    /** 時間軸顯示中：每 0.25 秒更新；放開按鍵後，等播放恢復正常（不在緩衝）1.2 秒就收起。 */
+    private val seekTick = object : Runnable {
+        override fun run() {
+            if (!seekShown || isFinishing) return
+            val now = SystemClock.uptimeMillis()
+            updateSeekBar(if (seekReleasedAt == 0L && seekTarget >= 0) seekTarget else player.currentPosition)
+            val settled = player.isPlaying || !player.playWhenReady || player.playbackState == Player.STATE_ENDED
+            if (seekReleasedAt > 0 && settled && now - seekReleasedAt >= 1200) { hideSeekBar(); return }
+            if (seekReleasedAt > 0 && now - seekReleasedAt > 15_000) { hideSeekBar(); return }   // 保險：一直在緩衝也不要永遠掛著
+            ui.postDelayed(this, 250)
+        }
     }
 
     private val hideTitle = Runnable { titleBox.animate().alpha(0f).setDuration(400).start() }
@@ -508,6 +650,7 @@ class PlayerActivity : Activity() {
         val i = player.currentMediaItemIndex
         val it = items.getOrNull(i) ?: return
         ui.removeCallbacks(hideTitle)
+        if (visible) hideSeekBar()                     // 控制列有自己的時間軸
         if (visible) {
             titleText.text = it.title
             subText.text = listOf(it.artist, "${i + 1} / ${items.size}").filter { s -> s.isNotEmpty() }.joinToString("  ·  ")
@@ -578,12 +721,17 @@ class PlayerActivity : Activity() {
                     }
                     KeyEvent.KEYCODE_DPAD_RIGHT -> { seekBy(+seekStep(event.repeatCount)); consumedKey = code; return true }
                     KeyEvent.KEYCODE_DPAD_LEFT -> { seekBy(-seekStep(event.repeatCount)); consumedKey = code; return true }
+                    KeyEvent.KEYCODE_DPAD_DOWN -> { if (event.repeatCount == 0) toggleSubtitles(); consumedKey = code; return true }
                 }
             }
             consumedKey = 0
         }
         if (event.action == KeyEvent.ACTION_UP && code == consumedKey && code != KeyEvent.KEYCODE_BACK) {
             consumedKey = 0
+            if ((code == KeyEvent.KEYCODE_DPAD_LEFT || code == KeyEvent.KEYCODE_DPAD_RIGHT) && seekShown) {
+                seekReleasedAt = SystemClock.uptimeMillis()          // 放開了：恢復正常播放後收起時間軸
+                ui.removeCallbacks(seekTick); ui.postDelayed(seekTick, 250)
+            }
             return true          // 按下時已經處理過的鍵：放開時不要再交給控制列（免得暫停後又被當成按了播放鍵）
         }
         if (code == KeyEvent.KEYCODE_BACK) {
@@ -606,8 +754,12 @@ class PlayerActivity : Activity() {
         val dur = player.duration
         var target = player.currentPosition + delta
         if (dur > 0) target = target.coerceAtMost(dur - 1000)
-        player.seekTo(target.coerceAtLeast(0L))
-        flashTitle(target.coerceAtLeast(0L))
+        target = target.coerceAtLeast(0L)
+        val actual = target - player.currentPosition
+        player.seekTo(target)
+        Log.i(TAG, "seek to=$target")
+        flashTitle(target)
+        showSeekBar(target, actual)
     }
 
     private fun focusName(): String = try {

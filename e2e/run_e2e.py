@@ -196,6 +196,63 @@ def idle(pg):
     wait_for(lambda: not pg.state().get("busy"), 10, 0.5)
 
 
+def seek_subtitle_cases(pg):
+    """2026-10-16 使用者需求：
+    - 播放中（控制列收起）按「下」＝字幕開／關；
+    - 按左右快轉／倒轉時，畫面下方出現時間軸；放開按鍵、恢復正常播放後時間軸消失（控制列不會跑出來）。"""
+    idle(pg)
+    adb("logcat", "-c")
+    pg.ev("setFocus(document.querySelector('.grid.songs .card[data-i=\"0\"]'))")   # H.264 那支（有中英字幕）
+    key("KEYCODE_ENTER", 1, 1)
+    wait_for(lambda: "PlayerActivity" in resumed(), 15, 1)
+    wait_for(lambda: player_log(r"playing=true"), 15, 0.5)
+    wait_for(ctl_hidden_now, 10, 0.5)
+    sub0 = player_log(r"subtitle item=0 ")
+    check("[字幕] 播放時字幕預設開啟（英文）", sub0 and "selected=en" in sub0[-1], sub0[-1:])
+
+    n0 = len(logcat().splitlines())
+    key("KEYCODE_DPAD_DOWN", 1, 2.5)
+    new = [l.split("YTmateTV:")[-1].strip() for l in logcat().splitlines()[n0:]]
+    tog = [l for l in new if "subtitle toggle" in l]
+    sel = [l for l in new if l.startswith("subtitle item=0")]
+    saved_off = " ".join(l for l in new if "saved=" in l)
+    check("[字幕] 按「下」→ 關閉字幕（控制列沒有跑出來）", tog and "-> off" in tog[-1] and (not sel or "selected=none" in sel[-1])
+          and not any("key KEYCODE_DPAD_DOWN shown=true" in l for l in new), (tog + sel)[-3:])
+    shot("10_sub_off")
+    n0 = len(logcat().splitlines())
+    key("KEYCODE_DPAD_DOWN", 1, 2.5)
+    new = [l.split("YTmateTV:")[-1].strip() for l in logcat().splitlines()[n0:]]
+    tog = [l for l in new if "subtitle toggle" in l]
+    sel = [l for l in new if l.startswith("subtitle item=0")]
+    check("[字幕] 再按「下」→ 打開字幕（回到英文）", tog and "-> en" in tog[-1] and sel and "selected=en" in sel[-1], (tog + sel)[-3:])
+    check("[字幕] 字幕開關會記住（存在 App 設定）", tog and "-> en" in tog[-1] and "saved=en" in "".join(new) and "saved=off" in saved_off, saved_off)
+
+    # 按住「右」快轉：時間軸出現 → 放開、恢復播放後消失；控制列不出現
+    n0 = len(logcat().splitlines())
+    sh("input", "keyevent", "--longpress", "KEYCODE_DPAD_RIGHT")
+    time.sleep(0.4)
+    mid = [l.split("YTmateTV:")[-1].strip() for l in logcat().splitlines()[n0:]]
+    shot("11_seekbar")
+    check("[時間軸] 快轉時畫面下方出現時間軸", any("seekbar visible=true" in l for l in mid), [l for l in mid if "seek" in l][-3:])
+    seeks = [int(re.search(r"to=(\d+)", l).group(1)) for l in mid if l.startswith("seek to=")]
+    check("[時間軸] 按住會連續快轉", len(seeks) >= 2 and seeks[-1] > seeks[0], seeks)
+    gone = wait_for(lambda: any("seekbar visible=false" in l.split("YTmateTV:")[-1] for l in logcat().splitlines()[n0:]), 8, 0.5)
+    allnew = [l.split("YTmateTV:")[-1].strip() for l in logcat().splitlines()[n0:]]
+    check("[時間軸] 放開後恢復播放 → 時間軸自動消失", gone, [l for l in allnew if "seekbar" in l or "playing=" in l][-4:])
+    check("[時間軸] 快轉時控制列不會跑出來", not any("controller visible=true" in l for l in allnew), [l for l in allnew if "controller" in l][-3:])
+    # 倒轉一下（單按）：一樣出現、消失
+    n0 = len(logcat().splitlines())
+    key("KEYCODE_DPAD_LEFT", 1, 0.3)
+    gone = wait_for(lambda: any("seekbar visible=false" in l for l in logcat().splitlines()[n0:]), 8, 0.5)
+    lines = [l.split("YTmateTV:")[-1].strip() for l in logcat().splitlines()[n0:] if "seekbar" in l]
+    check("[時間軸] 按「左」倒轉：時間軸出現，放開後消失", gone and any("visible=true" in l for l in lines), lines)
+    for _ in range(3):
+        key("KEYCODE_BACK", 1, 1.5)
+        if "MainActivity" in resumed():
+            break
+    wait_for(lambda: "MainActivity" in resumed(), 10, 1)
+
+
 def controller_cases(pg):
     """使用者回報：在小米電視上用控制列按「下一支」→ 下一支開始播了，但控制列一直不收起來，要按返回才會收。
     這裡完全照著遙控器操作重現，並檢查各種情況下控制列都會自動收起。
@@ -459,6 +516,7 @@ def main():
     check("[設定] 字幕可以關閉", "字幕：關閉" in labels(), labels())
     key("KEYCODE_ENTER", 1, 1)
     key("KEYCODE_BACK", 1, 2)
+    seek_subtitle_cases(pg)
 
     # ⑧ 返回鍵：頻道頁 → 首頁 → 連按兩次離開
     key("KEYCODE_BACK", 1, 1.5)

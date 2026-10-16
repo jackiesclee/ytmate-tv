@@ -309,7 +309,8 @@ object Prefs {
     }
 
     // 使用者設定：只接受這幾個鍵與值（頁面不能拿這個存任意資料；取消配對也不會清掉）
-    private val ALLOWED = mapOf("quality" to setOf("auto", "low"), "subs" to setOf("en", "zh", "off"))
+    private val ALLOWED = mapOf("quality" to setOf("auto", "low"), "subs" to setOf("en", "zh", "off"),
+        "subs_last" to setOf("en", "zh"))          // 播放器按「下」關字幕前的語言（再打開時用）
 
     fun get(ctx: Context, key: String): String {
         if (key !in ALLOWED) return ""
