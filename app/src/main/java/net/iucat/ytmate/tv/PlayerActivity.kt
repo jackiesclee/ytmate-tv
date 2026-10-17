@@ -110,7 +110,7 @@ class PlayerActivity : Activity() {
         private const val NET_RETRIES = 3
         // 「N 秒後播放下一支」：影片要夠長才顯示（自動測試的影片只有 40 秒，測試版門檻較低）
         private val COUNTDOWN_MIN_DUR = if (BuildConfig.E2E) 20_000L else 60_000L
-        private const val COUNTDOWN_MS = 5_500L
+        private const val COUNTDOWN_MS = 5_000L
         private const val PREFETCH_SEC = 180L            // 預先下載下一支的前幾秒
         @Volatile
         var pending: String? = null      // MainActivity 傳來的播放清單 JSON（清單可能很長，不放 Intent）
@@ -890,6 +890,7 @@ class PlayerActivity : Activity() {
             else -> s
         }
         summaryBox.visibility = View.VISIBLE
+        noticeBox.visibility = View.GONE              // 摘要是自己叫出來的：右上角的提示先收起，不要蓋住
         Log.i(TAG, "summary shown len=${s?.length ?: -1}")
     }
 
