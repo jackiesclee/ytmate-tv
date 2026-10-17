@@ -11,6 +11,7 @@ const IGNORE_CSS = new Set([
   'css-touch-action',
   'object-fit',               // Chrome 31 起支援；doiuse 舊資料誤判 Android 瀏覽器
   'css-filters',              // 只用在背景模糊（舊核心 .lite 直接隱藏），不支援也不影響
+  'css-masks',                // 2026-10-17：只用來讓首頁上方大圖的邊緣淡出；Chrome 53 支援 -webkit-mask-image（頁面有寫），不支援也只是邊緣比較硬
   'css-boxshadow','css-gradients','css-transitions','css-animation','transforms2d','css-textshadow','viewport-units','calc','css-variables','flexbox','multicolumn','css3-cursors','background-img-opts','border-radius','css-nth-child','css-sel3','css-line-clamp',
 ]);
 async function main(files) {

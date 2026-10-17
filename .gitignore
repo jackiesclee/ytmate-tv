@@ -7,3 +7,8 @@ local.properties
 captures/
 *.apk
 *.aab
+
+# 簽章金鑰只放在 GitHub Secrets，永遠不要提交
+keystore/
+*.jks
+*.keystore

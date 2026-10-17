@@ -11,6 +11,8 @@ plugins {
 val baseUrl: String = (System.getenv("YTMATE_BASE_URL") ?: "https://music.iucat.net").trimEnd('/')
 // 版本號：GitHub Actions 每次編譯自動 +1（新版可以直接覆蓋安裝）
 val buildNo: Int = (System.getenv("GITHUB_RUN_NUMBER") ?: "1").toInt()
+// 2026-10-17：手機遙控等大改版 → 版本名稱改成 1.1.x（第 10 次編譯起；versionCode 仍是編譯序號，一直遞增）
+val versionLabel: String = if (buildNo >= 10) "1.1.${buildNo - 10}" else "1.0.$buildNo"
 // 簽章：有提供金鑰庫才用正式簽章（之後更新都必須用同一把）；沒有就用除錯簽章
 val ksPath: String? = System.getenv("YTMATE_KEYSTORE")
 val hasKs: Boolean = ksPath != null && File(ksPath).exists()
@@ -24,7 +26,7 @@ android {
         minSdk = 24
         targetSdk = 34
         versionCode = buildNo
-        versionName = "1.0.$buildNo"
+        versionName = versionLabel
         buildConfigField("String", "BASE_URL", "\"$baseUrl\"")
         buildConfigField("boolean", "E2E", "false")
         manifestPlaceholders["cleartext"] = "false"
@@ -77,6 +79,7 @@ dependencies {
     implementation("androidx.media3:media3-ui:$media3")
     implementation("androidx.media3:media3-datasource:$media3")
     implementation("androidx.media3:media3-session:$media3")     // 媒體工作階段：系統／遙控器媒體鍵、Google 助理「暫停」
+    implementation("androidx.media3:media3-database:$media3")    // 2026-10-17：播放暫存（SimpleCache 的索引資料庫）
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("androidx.annotation:annotation:1.8.2")
 }

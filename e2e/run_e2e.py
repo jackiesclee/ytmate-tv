@@ -14,6 +14,9 @@ YTmate TV 模擬器自動測試（GitHub Actions 執行）。
      媒體檔請求都要帶登入 cookie
   5. 返回鍵：播放器 → 頻道頁 → 首頁；首頁連按兩次離開 App
   6. 重新開啟 App → 不用重新配對，自動登入
+  7. 2026-10-17（v1.1）📱 手機遙控：播放（指定開始時間）、暫停／繼續、快轉、音量、提示、停止；章節、摘要（選單鍵）、
+     預先下載下一支、「5 秒後播放下一支」（取消／立即播）、播完接著播待播清單、看到哪裡存到伺服器；
+     電視首頁一排一排（大橫幅左右切換、繼續觀看、焦點資訊區顯示摘要、往上回到大橫幅）、螢幕保護、系統螢幕保護程式
 結果（report.md、results.json、截圖）輸出到 --out 資料夾。任何一項失敗 → 結束代碼 1。
 """
 import argparse
@@ -344,6 +347,179 @@ def controller_cases(pg):
         sh("settings", "put", "global", k, "0")
 
 
+def post(path, body=None):
+    req = urllib.request.Request(SRV + path, data=json.dumps(body or {}).encode(), method="POST", headers={"Content-Type": "application/json"})
+    return json.load(urllib.request.urlopen(req, timeout=10))
+
+
+def remote():
+    return json.load(urllib.request.urlopen(SRV + "/test/remote", timeout=10))
+
+
+def inject(ctype, args):
+    """模擬手機送指令，回傳指令 id。"""
+    return post("/test/cmd", {"type": ctype, "args": args})["id"]
+
+
+def ack_of(cid, timeout=20):
+    return wait_for(lambda: remote()["acks"].get(cid), timeout, 0.5)
+
+
+def rstate():
+    return remote()["state"]
+
+
+def remote_cases(pg):
+    """2026-10-17 使用者需求（方案 A）：手機控制電視。測試程式扮演手機（/test/cmd），App 長輪詢領指令、回報結果與狀態。"""
+    adb("logcat", "-c")
+    on = wait_for(lambda: rstate().get("version"), 45, 1)
+    check("[遙控] App 開著時會連線、回報狀態（版本、音量）", on and rstate().get("volume_max", 0) > 0, rstate())
+    # ① 播放（從 15 秒開始；兩支：H.264、AV1）
+    cid = inject("play", {"video_ids": ["h264", "av1"], "start_pos": 15, "title": "手機送來的"})
+    top = wait_for(lambda: "PlayerActivity" in resumed(), 30, 1)
+    a = ack_of(cid)
+    check("[遙控] 手機送「播放」→ 電視開啟播放器、回報已開始播放", top and a and a.get("ok"), a)
+    check("[遙控] 從手機指定的時間點開始（15 秒）", wait_for(lambda: player_log(r"start pos=15000"), 10, 0.5), player_log("start pos|playlist loaded")[-2:])
+    st = wait_for(lambda: rstate() if rstate().get("screen") == "player" and rstate().get("video_id") == "h264" and rstate().get("pos", 0) >= 14 else None, 25, 1)
+    check("[遙控] 電視回報正在播什麼（影片、位置、第幾支）", st and st.get("count") == 2, rstate())
+    wait_for(lambda: player_log(r"playing=true"), 15, 0.5)
+    wait_for(ctl_hidden_now, 10, 0.5)
+    # ② 暫停／繼續
+    cid = inject("control", {"action": "toggle"})
+    a = ack_of(cid)
+    check("[遙控] 暫停", a and a.get("ok") and wait_for(lambda: rstate().get("playing") is False, 15, 0.5), a)
+    cid = inject("control", {"action": "toggle"})
+    a = ack_of(cid)
+    check("[遙控] 繼續播放", a and a.get("ok") and wait_for(lambda: rstate().get("playing") is True, 15, 0.5), a)
+    wait_for(ctl_hidden_now, 10, 0.5)
+    # ③ 快轉 10 秒 → 時間軸＋章節名稱
+    check("[章節] 載入這支影片的章節（時間軸標出分段點）", wait_for(lambda: player_log(r"chapters item=0 n=2"), 15, 0.5), player_log("info vid|chapters")[-2:])
+    n0 = len(logcat().splitlines())
+    cid = inject("control", {"action": "seek_rel", "value": 10})
+    a = ack_of(cid)
+    new = [l.split("YTmateTV:")[-1].strip() for l in logcat().splitlines()[n0:]]
+    check("[遙控] 快轉 10 秒（畫面顯示時間軸）", a and a.get("ok") and "快轉" in a.get("msg", "") and any("seekbar visible=true" in l for l in new), (a, [l for l in new if "seek" in l][-3:]))
+    check("[章節] 快轉時顯示目前章節名稱", any("seek chapter=重點段落" in l for l in new), [l for l in new if "chapter" in l][-2:])
+    shot("12_remote_seek")
+    # ④ 音量
+    a = ack_of(inject("control", {"action": "volume_up"}))
+    check("[遙控] 調整音量（回報目前音量）", a and a.get("ok") and ("音量" in a.get("msg", "") or "靜音" in a.get("msg", "")), a)
+    # ⑤ 提示（播放中）
+    n0 = len(logcat().splitlines())
+    a = ack_of(inject("toast", {"text": "⚔️ 新一集做好了：測試", "image": "/api/files/thumb/thumb_7c3aed.jpg"}))
+    check("[提示] 播放中右上角顯示提示（不中斷播放）", a and a.get("ok") and any("notice shown" in l for l in logcat().splitlines()[n0:]) and rstate().get("playing") is not False, a)
+    time.sleep(1.5)
+    shot("13_notice")
+    # ⑥ 選單鍵 → 控制列＋中文摘要
+    wait_for(ctl_hidden_now, 10, 0.5)
+    n0 = len(logcat().splitlines())
+    key("KEYCODE_MENU", 1, 1.5)
+    sm = [l for l in logcat().splitlines()[n0:] if "summary shown" in l]
+    check("[摘要] 選單鍵叫出控制列時，右邊顯示這支影片的中文摘要", sm and not sm[-1].rstrip().endswith("len=-1") and not sm[-1].rstrip().endswith("len=0"), sm[-1:])
+    shot("14_summary")
+    key("KEYCODE_BACK", 1, 1)
+    # ⑦ 預先下載下一支（播放暫存開著時）
+    cache_on = player_log(r"player buffer .*cache=true")
+    INFO["cache"] = (player_log(r"cache (on|off)") or [""])[-1]
+    if cache_on:
+        pf = wait_for(lambda: player_log(r"prefetch item=1 .*done"), 30, 1)
+        files = [x for x in srvlog() if x["kind"] == "req" and x["path"].startswith("/api/files/video/") and x.get("range")]
+        check("[預先下載] 目前這支緩衝夠了 → 在背景先下載下一支的開頭", pf and files, (pf, [f["path"] + " " + f["range"] for f in files][-3:]))
+    else:
+        check("[預先下載] 模擬器空間不足，播放暫存自動關閉（不佔空間）", player_log(r"cache off"), INFO["cache"])
+    # ⑧ 「5 秒後播放下一支」：返回＝取消
+    adb("logcat", "-c")
+    ack_of(inject("control", {"action": "seek_abs", "value": 31}))
+    cd = wait_for(lambda: player_log(r"countdown show item=0"), 12, 0.5)
+    check("[下一支] 快播完時右下角出現「N 秒後播放：下一支」", cd, player_log("countdown|seek to")[-3:])
+    shot("15_countdown")
+    key("KEYCODE_BACK", 1, 1)
+    check("[下一支] 按返回 → 取消自動播放", player_log(r"countdown cancel item=0"), player_log("countdown")[-3:])
+    time.sleep(9)
+    check("[下一支] 取消後停在這支的結尾（沒有跳到下一支）", not player_log(r"transition item=1") and "PlayerActivity" in resumed(), player_log("transition|playing=")[-3:])
+    # ⑨ 「5 秒後播放下一支」：確認＝立刻播（手機再送一次清單 → 同一個播放器換清單）
+    adb("logcat", "-c")
+    cid = inject("play", {"video_ids": ["h264", "av1"], "start_pos": 31})
+    a = ack_of(cid)
+    check("[遙控] 播放器開著時又送清單 → 同一個播放器換清單（不用重開）", a and a.get("ok") and player_log(r"playlist loaded .*replace=true"), player_log("playlist loaded")[-1:])
+    cd = wait_for(lambda: player_log(r"countdown show item=0"), 15, 0.5)
+    key("KEYCODE_ENTER", 1, 1)
+    nx = wait_for(lambda: player_log(r"transition item=1"), 8, 0.5)
+    check("[下一支] 按確認 → 立刻播下一支", cd and nx and player_log(r"countdown play next"), player_log("countdown|transition")[-3:])
+    # ⑩ 整份清單播完 → 接著播待播清單
+    post("/test/queue", {"video_ids": ["music"]})
+    adb("logcat", "-c")
+    ack_of(inject("control", {"action": "seek_abs", "value": 38}))
+    qt = wait_for(lambda: [x for x in srvlog() if x["kind"] == "queue_take"], 25, 1)
+    ql = wait_for(lambda: player_log(r"playlist loaded items=1 .*replace=true"), 20, 1)
+    check("[待播清單] 整份清單播完 → 接著播待播清單（同一個播放器）", qt and ql and "PlayerActivity" in resumed(), player_log("playlist ended|queue|playlist loaded")[-3:])
+    # ⑪ 停止
+    a = ack_of(inject("control", {"action": "stop"}))
+    back = wait_for(lambda: "MainActivity" in resumed(), 15, 1)
+    check("[遙控] 停止 → 回到 YTmate 頁面", a and a.get("ok") and back, a)
+    rs = [x for x in srvlog() if x["kind"] == "resume"]
+    check("[續播] 看到哪裡會存到伺服器（看完的標成看過）", rs and any(x.get("vid") == "h264" for x in rs), rs[-3:])
+    # ⑫ 沒在播放時
+    a = ack_of(inject("control", {"action": "toggle"}))
+    check("[遙控] 沒在播放時按暫停 → 回報「沒有在播放」", a and not a.get("ok") and "沒有在播放" in a.get("msg", ""), a)
+    a = ack_of(inject("toast", {"text": "📥 測試頻道 有 3 支新影片"}))
+    time.sleep(1)
+    check("[提示] 在頁面上也會顯示右上角提示", a and a.get("ok") and "3 支新影片" in (pg.state().get("notice") or ""), pg.state().get("notice"))
+    shot("16_page_notice")
+
+
+def home_rows_cases(pg):
+    """2026-10-17：電視首頁改成一排一排＋上方焦點資訊區；螢幕保護。"""
+    post("/test/rows", {"on": True})
+    pg.ev("S.homeFocus = null; loadHome()")          # 像剛打開 App 一樣（焦點從大橫幅開始）
+    st = wait_for(lambda: pg.state() if "cont" in (pg.state().get("rows") or []) else None, 20, 1)
+    check("[首頁] 一排一排：繼續觀看、最新同步、我的節目", st and set(["cont", "recent", "shows"]) <= set(st["rows"]), st)
+    check("[首頁] 一開始焦點在大橫幅（最新節目）", pg.state().get("focusAct") == "hero" and "最新節目" in pg.state().get("spot", ""), pg.state())
+    shot("17_home_rows")
+    h0 = pg.state().get("heroIdx")
+    key("KEYCODE_DPAD_RIGHT", 1, 1)
+    check("[首頁] 大橫幅按「右」→ 換下一集", pg.state().get("heroIdx") == (h0 + 1) % 2 and "AV1" in pg.state().get("spot", ""), pg.state())
+    key("KEYCODE_DPAD_DOWN", 1, 1)
+    st = pg.state()
+    check("[首頁] 按「下」→ 到「繼續觀看」這排", st.get("focusRow") == "cont" and st.get("focusVid") == "h264", st)
+    sp = wait_for(lambda: pg.state().get("spot") if "中文摘要" in pg.state().get("spot", "") else None, 10, 0.5)
+    check("[首頁] 選到影片時，上方顯示標題、看到哪裡、AI 中文摘要", sp and "看到 0:12" in sp, pg.state().get("spot"))
+    shot("18_home_spot")
+    key("KEYCODE_DPAD_RIGHT", 1, 1)
+    check("[首頁] 同一排按「右」→ 下一張", pg.state().get("focusVid") == "av1" and pg.state().get("focusRow") == "cont", pg.state())
+    key("KEYCODE_DPAD_DOWN", 1, 1)
+    check("[首頁] 再按「下」→ 下一排（最新同步）", pg.state().get("focusRow") == "recent", pg.state())
+    key("KEYCODE_DPAD_UP", 2, 1)
+    check("[首頁] 從最上面一排往上 → 回到大橫幅", pg.state().get("focusAct") == "hero", pg.state())
+    n0 = len(srvlog())
+    key("KEYCODE_ENTER", 1, 2)
+    top = wait_for(lambda: "PlayerActivity" in resumed(), 20, 1)
+    vq = [x for x in srvlog()[n0:] if x["kind"] == "videos"]
+    check("[首頁] 大橫幅按確認 → 播放這一排（跟伺服器拿這台電視的播放資料）", top and vq, vq[-1:])
+    for _ in range(3):
+        key("KEYCODE_BACK", 1, 1.5)
+        if "MainActivity" in resumed():
+            break
+    wait_for(lambda: "MainActivity" in resumed(), 10, 1)
+    # 螢幕保護（測試把閒置時間縮短成 3 秒）
+    time.sleep(2)
+    pg.ev("S.saverIdle = 3000; S.lastKey = Date.now()")
+    sv = wait_for(lambda: pg.state().get("saver"), 15, 1)
+    check("[螢幕保護] YTmate 開著、閒置一段時間 → 全螢幕輪播最新節目封面與時間", sv, pg.state())
+    shot("19_saver")
+    key("KEYCODE_DPAD_DOWN", 1, 1)
+    check("[螢幕保護] 按任意鍵 → 回到原畫面", not pg.state().get("saver"), pg.state())
+    pg.ev("S.saverIdle = 300000")
+    ds = sh("dumpsys", "package", PKG)
+    check("[螢幕保護] 有註冊系統螢幕保護程式（電視設定裡可以選 YTmate）", "android.service.dreams.DreamService" in ds and "SaverService" in ds)
+    # 設定頁：播放暫存
+    key("KEYCODE_MENU", 1, 1.5)
+    ci = pg.ev("document.getElementById('cacheInfo').textContent + ' | ' + document.getElementById('cbtn').textContent + ' | ' + document.getElementById('remoteInfo').textContent")
+    check("[設定] 顯示播放暫存（依剩餘空間自動）與手機遙控狀態", ci and "暫存：自動" in ci and "可用" in ci, ci)
+    shot("20_settings_cache")
+    key("KEYCODE_MENU", 1, 1)
+
+
 def main():
     pg = Page()
     INFO["device"] = sh("getprop", "ro.product.model").strip() + " / Android " + sh("getprop", "ro.build.version.release").strip()
@@ -551,6 +727,11 @@ def main():
     key("KEYCODE_ENTER", 1, 3)                    # 首頁第一個頻道（格式測試）
     chq = wait_for(lambda: [x for x in srvlog()[n0:] if x["kind"] == "channel"], 15, 1)
     check("重新開啟 App → 畫質設定（480p）仍記得（頻道請求帶 q=low）", chq and chq[-1].get("q") == "low", chq[-1:] if chq else "")
+
+    # ⑩ 2026-10-17（v1.1）：手機遙控、電視首頁改版
+    pg.connect("/tv")
+    remote_cases(pg)
+    home_rows_cases(pg)
 
 
 try:

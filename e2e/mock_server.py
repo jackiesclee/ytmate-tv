@@ -9,6 +9,9 @@ YTmate TV 自動測試用的「測試伺服器」（只在 GitHub Actions 的模
     h264.mp4 藍底「H264 ORIGINAL」、av1.mp4 紅底「AV1 ORIGINAL」、low.mp4 綠底「480p COMPATIBLE」
   → 截圖顏色就看得出電視實際播的是哪個版本。
 - /test/* 給測試腳本用：核准配對、讀取請求紀錄。
+- 2026-10-17（v1.1）：📱 手機遙控（/api/remote/poll 長輪詢、state、ack、queue/take）、看到哪裡（/api/resume）、
+  首頁各排（/test/rows 打開後 /api/tv/home 才帶 rows，舊的測試流程不受影響）、任意影片（/api/tv/videos）、
+  影片資訊（/api/tv/info：H.264 那支有章節與摘要）。/test/cmd 模擬手機送指令、/test/remote 讀電視回報。
 """
 import json
 import os
@@ -22,6 +25,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 WWW, MEDIA = os.path.join(HERE, "www"), os.path.join(HERE, "media")
 app = Flask(__name__)
 LOG, LOCK = [], threading.Lock()
+COND = threading.Condition()
+CMDS, ACKS, STATE, QUEUE, RESUME = [], {}, {}, [], {}
+ROWS_ON = [False]
 PAIRS, TOKENS, SESSIONS = {}, {}, set()
 
 THUMBS = ["thumb_7c3aed.jpg", "thumb_db2777.jpg", "thumb_0891b2.jpg", "thumb_ea580c.jpg"]
@@ -118,7 +124,17 @@ def home():
     for i, c in enumerate(CHANNELS):
         out.append({**c, "cover": None, "thumbs": [f"/api/files/thumb/{THUMBS[(i + k) % 4]}" for k in range(4 if i % 3 else 1)],
                     "song_count": len(SONGS) if c["id"] == "fmt" else 3, "playable": 3})
-    return jsonify({"channels": out, "device_id": "dvtest"})
+    resp = {"channels": out, "device_id": "dvtest"}
+    if ROWS_ON[0]:
+        card = lambda vid, t, **kw: {"video_id": vid, "title": t, "duration": 40, "thumb": f"/api/files/thumb/{THUMBS[len(vid) % 4]}",
+                                     "channel_name": "🎬 格式測試", "resume": 0, "watched": False, "is_new": False, "description": "", **kw}
+        resp["rows"] = {
+            "hero": [card("h264", "最新節目：H.264", description="第一集的說明"), card("av1", "最新節目：AV1", description="第二集的說明")],
+            "cont": [card("h264", "H.264 原檔影片", resume=12, resume_dur=40), card("av1", "AV1 原檔影片", resume=8, resume_dur=40)],
+            "recent": [card("av1_unknown", "AV1（不知道格式）", is_new=True), card("music", "純音樂")],
+            "shows": [card("h264", "最新節目：H.264"), card("av1", "最新節目：AV1")],
+        }
+    return jsonify(resp)
 
 
 def sources_for(s, dec, prefer_low=False):
@@ -151,6 +167,102 @@ def channel(cid):
                     "codec": s["codec"], "need_low": False, "audio_only": src[0]["kind"] == "audio",
                     "note": "這台電視不支援原檔格式（av1），改播 480p 相容版" if src[0]["kind"] == "low" else ""})
     return jsonify({"id": cid, "name": cid, "songs": out, "decoders": sorted(dec), "quality": q})
+
+
+def song_obj(i, s, dec, q):
+    src = sources_for(s, dec, q == "low")
+    r = RESUME.get(s["video_id"]) or {}
+    return {"id": f"s{i}", "video_id": s["video_id"], "title": s["title"], "duration": 40,
+            "thumb_file": f"/api/files/thumb/{THUMBS[i % 4]}", "sources": src, "channel_name": "🎬 格式測試",
+            "subtitles": {"zh-Hant": "/api/files/sub/zh.vtt", "en": "/api/files/sub/en.vtt"} if s["video_id"] == "h264" else {},
+            "codec": s["codec"], "need_low": False, "audio_only": src[0]["kind"] == "audio", "note": "",
+            "resume": 0 if r.get("done") else r.get("pos", 0), "resume_at": r.get("at", 0), "watched": bool(r.get("done"))}
+
+
+@app.route("/api/tv/videos", methods=["POST"])
+def tv_videos():
+    if not logged_in():
+        return jsonify({"error": "需要登入"}), 401
+    b = request.get_json(silent=True) or {}
+    dec = {x for x in (b.get("dec") or "h264,vp9,av1").split(",") if x} | {"h264"}
+    log("videos", vids=b.get("video_ids"), q=b.get("q"))
+    by = {s["video_id"]: (i, s) for i, s in enumerate(SONGS)}
+    return jsonify({"songs": [song_obj(*by[v], dec, b.get("q")) for v in b.get("video_ids") or [] if v in by]})
+
+
+@app.route("/api/tv/info/<vid>")
+def tv_info(vid):
+    if not logged_in():
+        return jsonify({"error": "需要登入"}), 401
+    log("info", vid=vid)
+    if vid == "h264":
+        return jsonify({"video_id": vid, "summary": "這是 H.264 測試影片的中文摘要：藍色畫面、中英字幕。",
+                        "chapters": [{"start": 0, "end": 15, "title": "開場"}, {"start": 15, "end": 40, "title": "重點段落"}], "resume": RESUME.get(vid) or {}})
+    return jsonify({"video_id": vid, "summary": "", "chapters": [], "resume": {}})
+
+
+@app.route("/api/resume/<vid>", methods=["GET", "POST"])
+def resume(vid):
+    if not logged_in():
+        return jsonify({"error": "需要登入"}), 401
+    if request.method == "POST":
+        b = request.get_json(silent=True) or {}
+        RESUME[vid] = {"pos": 0 if b.get("done") else b.get("pos", 0), "dur": b.get("dur", 0), "done": bool(b.get("done")), "at": time.time()}
+        log("resume", vid=vid, pos=b.get("pos"), done=bool(b.get("done")))
+    return jsonify(RESUME.get(vid) or {})
+
+
+# ── 📱 手機遙控（電視端）──
+@app.route("/api/remote/poll")
+def remote_poll():
+    if not logged_in():
+        return jsonify({"error": "需要登入"}), 401
+    wait = min(float(request.args.get("wait") or 20), 25)
+    deadline = time.time() + wait
+    with COND:
+        while True:
+            ready = [c for c in CMDS if c["status"] == "pending"]
+            if ready or time.time() >= deadline:
+                for c in ready:
+                    c["status"] = "delivered"
+                break
+            COND.wait(timeout=max(0.05, deadline - time.time()))
+    if ready:
+        log("poll_cmds", ids=[c["id"] for c in ready])
+    return jsonify({"cmds": [{"id": c["id"], "type": c["type"], "args": c["args"]} for c in ready]})
+
+
+@app.route("/api/remote/state", methods=["POST"])
+def remote_state():
+    if not logged_in():
+        return jsonify({"error": "需要登入"}), 401
+    b = request.get_json(silent=True) or {}
+    with COND:
+        STATE.clear(); STATE.update(b.get("state") or {}); STATE["at"] = time.time()
+        for a in b.get("acks") or []:
+            ACKS[a.get("id")] = a
+    if b.get("acks"):
+        log("acks", acks=b["acks"])
+    return jsonify({"ok": True})
+
+
+@app.route("/api/remote/ack", methods=["POST"])
+def remote_ack():
+    for a in (request.get_json(silent=True) or {}).get("results") or []:
+        ACKS[a.get("id")] = a
+    return jsonify({"ok": True})
+
+
+@app.route("/api/remote/queue/take", methods=["POST"])
+def remote_queue_take():
+    if not logged_in():
+        return jsonify({"songs": []})
+    b = request.get_json(silent=True) or {}
+    dec = {x for x in (b.get("dec") or "h264,vp9,av1").split(",") if x} | {"h264"}
+    vids = list(QUEUE); QUEUE.clear()
+    log("queue_take", vids=vids)
+    by = {s["video_id"]: (i, s) for i, s in enumerate(SONGS)}
+    return jsonify({"songs": [song_obj(*by[v], dec, b.get("q")) for v in vids if v in by]})
 
 
 @app.route("/api/tv/prepare", methods=["POST"])
@@ -194,6 +306,35 @@ def t_expire():
     SESSIONS.clear()
     log("expired")
     return jsonify({"ok": True})
+
+
+@app.route("/test/cmd", methods=["POST"])
+def t_cmd():
+    """模擬手機送指令：{type, args} → 回傳指令 id。"""
+    b = request.get_json(silent=True) or {}
+    c = {"id": secrets.token_hex(5), "type": b.get("type"), "args": b.get("args") or {}, "status": "pending"}
+    with COND:
+        CMDS.append(c); COND.notify_all()
+    log("test_cmd", id=c["id"], type=c["type"], args=c["args"])
+    return jsonify({"id": c["id"]})
+
+
+@app.route("/test/remote")
+def t_remote():
+    with COND:
+        return jsonify({"state": dict(STATE), "acks": dict(ACKS), "cmds": [dict(c) for c in CMDS]})
+
+
+@app.route("/test/queue", methods=["POST"])
+def t_queue():
+    QUEUE[:] = (request.get_json(silent=True) or {}).get("video_ids") or []
+    return jsonify({"queue": QUEUE})
+
+
+@app.route("/test/rows", methods=["POST"])
+def t_rows():
+    ROWS_ON[0] = bool((request.get_json(silent=True) or {}).get("on", True))
+    return jsonify({"rows": ROWS_ON[0]})
 
 
 @app.route("/test/log")

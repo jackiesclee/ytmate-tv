@@ -54,7 +54,10 @@ jobs:
           gradle-version: "8.9"
 
       - name: 編譯自動測試版 APK
-        run: gradle :app:assembleE2e --no-daemon
+        run: |
+          set -o pipefail
+          mkdir -p e2e-out
+          gradle :app:assembleE2e --no-daemon 2>&1 | tee e2e-out/api${{ matrix.api }}_build.log
 
       - uses: actions/setup-python@v5
         with:
@@ -81,6 +84,7 @@ jobs:
         if: always()
         run: |
           mkdir -p e2e-out && cp mock_server.log e2e-out/api${{ matrix.api }}_mock_server.log || true
+          [ -f e2e-out/api${{ matrix.api }}_report.md ] || echo "# 編譯或測試沒有完成，請看 api${{ matrix.api }}_build.log" > e2e-out/api${{ matrix.api }}_report.md
           ls -la e2e-out
           cat e2e-out/*_report.md || true
 

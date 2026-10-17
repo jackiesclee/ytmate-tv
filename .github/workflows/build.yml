@@ -70,7 +70,8 @@ jobs:
       - name: 整理檔名
         id: apk
         run: |
-          V="1.0.${GITHUB_RUN_NUMBER}"
+          # 2026-10-17：第 10 次編譯起版本名稱是 1.1.x（跟 app/build.gradle.kts 一致）
+          if [ "$GITHUB_RUN_NUMBER" -ge 10 ]; then V="1.1.$((GITHUB_RUN_NUMBER - 10))"; else V="1.0.${GITHUB_RUN_NUMBER}"; fi
           mkdir -p out
           cp app/build/outputs/apk/release/app-release.apk "out/YTmateTV-v${V}.apk"
           echo "version=${V}" >> "$GITHUB_OUTPUT"

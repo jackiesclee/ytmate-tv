@@ -6,10 +6,11 @@
 <title>YTmate TV</title>
 <link rel="icon" href="/assets/tv_icon.png">
 <style>
-/* 📺 YTmate 電視版（2026-10-14；2026-10-15 相容舊電視）
+/* 📺 YTmate 電視版（2026-10-14；2026-10-15 相容舊電視；2026-10-17 首頁改成一排一排＋上方焦點資訊區＋螢幕保護）
    相容規則：舊小米電視（例如 L55MA-A、系統 2.10.x）內建的網頁核心較舊，這頁只用 Android 7.0（約 Chrome 53）
    就支援的寫法：不用 inset、aspect-ratio、CSS grid、flex gap；16:9 用 padding-bottom 撐出比例；
-   舊核心另外加上 .lite（關閉背景模糊、動畫、大陰影，避免卡頓）。所有尺寸用 vw，任何解析度比例都一樣。 */
+   舊核心另外加上 .lite（關閉背景模糊、動畫、大陰影，避免卡頓）。所有尺寸用 vw，任何解析度比例都一樣。
+   版面：上方「焦點資訊區」固定不動（大橫幅／選到的影片資訊／頻道資訊），下方各排可以上下捲動。 */
 :root{--bg:#09090f;--card:#171724;--text:#f4f4f8;--muted:#a3a3b8;--pink:#ec4899;--violet:#7c3aed;--ring:#ffffff}
 *{box-sizing:border-box;margin:0;padding:0}
 html,body{background:#09090f;background:var(--bg);color:#f4f4f8;color:var(--text);font-family:'Noto Sans TC','Noto Sans CJK TC','PingFang TC','Microsoft JhengHei',sans-serif;overflow:hidden;height:100%}
@@ -18,10 +19,8 @@ body{font-size:1.2vw}
 #bgart{z-index:0;background-size:cover;background-position:center;-webkit-filter:blur(2.2vw) saturate(1.3);filter:blur(2.2vw) saturate(1.3);opacity:.45;-webkit-transform:scale(1.15);transform:scale(1.15)}
 #bgshade{z-index:1;background:linear-gradient(90deg,rgba(9,9,15,.97) 0%,rgba(9,9,15,.78) 45%,rgba(9,9,15,.35) 100%)}
 #bgshade2{z-index:1;background:linear-gradient(0deg,#09090f 0%,rgba(9,9,15,0) 55%)}
-#scroller{z-index:2;overflow-y:auto;overflow-x:hidden;-webkit-overflow-scrolling:touch}
-#scroller::-webkit-scrollbar{display:none}
 .row{display:-webkit-box;display:-webkit-flex;display:flex;-webkit-box-align:center;-webkit-align-items:center;align-items:center}
-.top{-webkit-box-pack:justify;-webkit-justify-content:space-between;justify-content:space-between;padding:2.2vw 4vw 0}
+.top{position:fixed;left:0;right:0;top:0;z-index:5;-webkit-box-pack:justify;-webkit-justify-content:space-between;justify-content:space-between;padding:1.8vw 4vw 0}
 .brand{font-weight:800;font-size:1.7vw}
 .brand img{width:2.6vw;height:2.6vw;border-radius:.65vw;margin-right:.9vw}
 .brand small{font-size:.8vw;font-weight:800;color:#be185d;background:#fff;border-radius:.4vw;padding:.1vw .45vw;margin-left:.6vw}
@@ -29,19 +28,40 @@ body{font-size:1.2vw}
 .clock{font-weight:600;color:#f4f4f8;margin-right:1.4vw}
 .gear{width:3vw;height:3vw;border-radius:50%;text-align:center;line-height:3vw;background:rgba(255,255,255,.08);font-size:1.4vw}
 .gear.focus{background:#fff;color:#111}
-.hero{padding:3.2vw 4vw 1.6vw;min-height:17vw}
-.hero h1{font-size:3.4vw;font-weight:800;line-height:1.15;max-width:62vw;text-shadow:0 .3vw 1.5vw rgba(0,0,0,.5)}
-.hero .meta{margin-top:.9vw;color:#a3a3b8;font-size:1.3vw}
-.hero .meta b{color:#fff;background:linear-gradient(135deg,#7c3aed,#ec4899);padding:.15vw .8vw;border-radius:99px;font-size:1vw;margin-right:1.2vw}
-.hero .desc{margin-top:.8vw;color:#d4d4e0;font-size:1.25vw;max-width:56vw;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
-.btns{margin-top:1.6vw}
-.btn{display:inline-block;padding:.9vw 2vw;border-radius:99px;background:rgba(255,255,255,.12);font-size:1.35vw;font-weight:700;margin-right:1.2vw;-webkit-transition:-webkit-transform .15s,background .15s;transition:transform .15s,background .15s}
+/* ── 上方焦點資訊區（固定）── */
+#spot{position:fixed;left:0;right:0;top:5.4vw;height:22.4vw;z-index:3;padding:0 4vw;overflow:hidden}
+#spot .sp-wrap{position:absolute;right:0;top:-5.4vw;width:54vw;height:27.8vw;-webkit-mask-image:linear-gradient(90deg,rgba(0,0,0,0) 0%,#000 40%);mask-image:linear-gradient(90deg,rgba(0,0,0,0) 0%,#000 40%)}
+#spot .sp-img{position:absolute;left:0;top:0;width:100%;height:100%;background-size:cover;background-position:center;-webkit-mask-image:linear-gradient(0deg,rgba(0,0,0,0) 0%,#000 42%);mask-image:linear-gradient(0deg,rgba(0,0,0,0) 0%,#000 42%)}
+#spot .sp-text{position:relative;z-index:2;width:52vw;padding-top:1vw}
+#spot .sp-label{display:inline-block;font-size:.95vw;font-weight:700;color:#fff;background:linear-gradient(135deg,#7c3aed,#ec4899);padding:.15vw .8vw;border-radius:99px;margin-bottom:.7vw}
+#spot h1{font-size:2.7vw;font-weight:800;line-height:1.2;text-shadow:0 .3vw 1.5vw rgba(0,0,0,.5);display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+#spot .sp-meta{margin-top:.7vw;color:#c8c8d8;font-size:1.15vw}
+#spot .sp-meta span{margin-right:1.1vw}
+#spot .sp-meta .chip{display:inline-block;border:1px solid rgba(255,255,255,.35);border-radius:.35vw;padding:0 .45vw;font-size:.9vw;margin-right:.5vw}
+#spot .sp-desc{margin-top:.7vw;color:#dcdce8;font-size:1.18vw;line-height:1.55;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;min-height:5.4vw}
+#spot .sp-prog{margin-top:.6vw;width:22vw;height:.35vw;background:rgba(255,255,255,.2);border-radius:99px;overflow:hidden}
+#spot .sp-prog i{display:block;height:100%;background:#ec4899}
+#spot.hero-on .sp-text{padding-top:.4vw}
+.hero-btn{display:inline-block;margin-top:1vw;padding:.75vw 1.8vw;border-radius:99px;background:rgba(255,255,255,.14);font-size:1.25vw;font-weight:700}
+.hero-btn.focus{background:#fff;color:#111;box-shadow:0 .6vw 2vw rgba(236,72,153,.45)}
+.dots{display:inline-block;margin-left:1.2vw;vertical-align:middle}
+.dots i{display:inline-block;width:.55vw;height:.55vw;border-radius:50%;background:rgba(255,255,255,.3);margin-right:.4vw}
+.dots i.on{background:#fff;width:1.4vw;border-radius:99px}
+.btns{margin-top:1vw}
+.btn{display:inline-block;padding:.8vw 1.9vw;border-radius:99px;background:rgba(255,255,255,.12);font-size:1.3vw;font-weight:700;margin-right:1.2vw;-webkit-transition:-webkit-transform .15s,background .15s;transition:transform .15s,background .15s}
 .btn.focus{background:#fff;color:#111;-webkit-transform:scale(1.06);transform:scale(1.06);box-shadow:0 .6vw 2vw rgba(236,72,153,.45)}
-.sec-title{padding:1vw 4vw .6vw;font-size:1.5vw;font-weight:700;color:#e5e5f0}
+/* ── 下方可捲動區 ── */
+#scroller{position:fixed;left:0;right:0;top:27.8vw;bottom:0;z-index:2;overflow-y:auto;overflow-x:hidden;-webkit-overflow-scrolling:touch}
+#scroller::-webkit-scrollbar{display:none}
+.sec-title{padding:.9vw 4vw .5vw;font-size:1.45vw;font-weight:700;color:#e5e5f0}
+.rowwrap{position:relative;overflow:hidden;padding:.8vw 0 1.6vw}
+.strip{white-space:nowrap;padding:0 3.4vw;-webkit-transition:-webkit-transform .2s ease;transition:transform .2s ease}
+.strip .card{display:inline-block;vertical-align:top;white-space:normal;width:16vw;margin:0 .6vw}
+.strip.wide .card{width:24vw}
 /* 卡片格線：flex 換行＋固定寬度（不用 grid／gap，舊核心也一樣整齊） */
-.grid{display:-webkit-box;display:-webkit-flex;display:flex;-webkit-flex-wrap:wrap;flex-wrap:wrap;padding:1vw 3.1vw 5vw}
+.grid{display:-webkit-box;display:-webkit-flex;display:flex;-webkit-flex-wrap:wrap;flex-wrap:wrap;padding:.8vw 3.1vw 5vw}
 .grid .card{width:21.6vw;margin:0 .9vw 2vw}            /* (100 − 2×3.1) ÷ 4 − 2×.9 */
-.grid.songs{padding:1vw 3.25vw 5vw}
+.grid.songs{padding:.8vw 3.25vw 5vw}
 .grid.songs .card{width:17.15vw;margin:0 .75vw 1.8vw}   /* (100 − 2×3.25) ÷ 5 − 2×.75 */
 .card{position:relative;border-radius:1vw;-webkit-transition:-webkit-transform .16s ease;transition:transform .16s ease}
 .art{position:relative;width:100%;height:0;padding-bottom:56.25%;border-radius:1vw;overflow:hidden;background:#171724}
@@ -50,33 +70,56 @@ body{font-size:1.2vw}
 .collage img{width:50%;height:50%;object-fit:cover}
 .collage img:nth-child(2){left:50%}.collage img:nth-child(3){top:50%}.collage img:nth-child(4){top:50%;left:50%}
 .art .ph{text-align:center;font-size:4vw;font-weight:800;color:rgba(255,255,255,.9);padding-top:3.4vw}
-.grid.songs .art .ph{padding-top:2.6vw}
+.grid.songs .art .ph,.strip .art .ph{padding-top:2.4vw;font-size:3vw}
 .art .shade{background:linear-gradient(0deg,rgba(0,0,0,.85) 0%,rgba(0,0,0,.15) 45%,rgba(0,0,0,0) 70%)}
 .art .name{position:absolute;left:1.1vw;right:1.1vw;bottom:.9vw;font-size:1.55vw;font-weight:800;line-height:1.2;text-shadow:0 .2vw .8vw rgba(0,0,0,.7);display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 .art .count{position:absolute;top:.8vw;right:.8vw;background:rgba(0,0,0,.6);border-radius:99px;padding:.15vw .7vw;font-size:.95vw;font-weight:600}
-.art .dur{position:absolute;right:.6vw;bottom:.6vw;background:rgba(0,0,0,.75);border-radius:.35vw;padding:.05vw .45vw;font-size:.9vw}
+.art .dur{position:absolute;right:.6vw;bottom:.7vw;background:rgba(0,0,0,.75);border-radius:.35vw;padding:.05vw .45vw;font-size:.9vw}
 .art .badge{position:absolute;left:.6vw;top:.6vw;background:rgba(124,58,237,.9);border-radius:.35vw;padding:.05vw .5vw;font-size:.85vw}
 .art .badge.gray{background:rgba(80,80,90,.92)}.art .badge.compat{background:rgba(14,116,144,.92)}
-.card .t{margin-top:.7vw;font-size:1.12vw;font-weight:600;line-height:1.35;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;color:#e9e9f2;min-height:3vw}
+.art .badge.new{background:#ec4899;font-weight:800}
+.art .prog{position:absolute;left:0;right:0;bottom:0;height:.4vw;background:rgba(255,255,255,.25)}
+.art .prog i{display:block;height:100%;background:#ec4899}
+.card .t{margin-top:.6vw;font-size:1.08vw;font-weight:600;line-height:1.35;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;color:#e9e9f2;min-height:2.9vw}
+.card .sub{font-size:.88vw;color:#9a9ab0;margin-top:.15vw;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .card.dim{opacity:.4}
+.card.seen .art img{opacity:.55}
+.card.seen .t{color:#9a9ab0}
 .card.focus{-webkit-transform:scale(1.08);transform:scale(1.08);z-index:3}
 .card.focus .art{box-shadow:0 0 0 .28vw #fff,0 1.2vw 3vw rgba(236,72,153,.4)}
 .card.focus .t{color:#fff}
-.empty{padding:6vw 4vw;color:#a3a3b8;font-size:1.6vw}
+.empty{padding:4vw;color:#a3a3b8;font-size:1.5vw}
 .toast{position:fixed;left:25%;right:25%;bottom:4vw;text-align:center;background:rgba(20,20,30,.95);border:1px solid rgba(255,255,255,.15);padding:1vw 2.2vw;border-radius:99px;font-size:1.3vw;z-index:90;opacity:0;-webkit-transition:opacity .25s;transition:opacity .25s}
 .toast.on{opacity:1}
+/* 右上角提示（新一集做好、同步到新影片；手機送來的提示） */
+#notice{position:fixed;right:3vw;top:3vw;z-index:95;width:30vw;background:rgba(22,22,34,.96);border:1px solid rgba(255,255,255,.14);border-radius:1.1vw;padding:1vw;display:none;box-shadow:0 1vw 3vw rgba(0,0,0,.5)}
+#notice.on{display:block}
+#notice img{width:100%;border-radius:.6vw;display:block;margin-bottom:.7vw}
+#notice div{font-size:1.25vw;font-weight:700;line-height:1.4}
 #loading{z-index:40;text-align:center;padding-top:22vw;font-size:1.6vw;color:#a3a3b8;background:rgba(9,9,15,.6)}
 .spin{display:inline-block;vertical-align:middle;width:3.2vw;height:3.2vw;border:.35vw solid rgba(255,255,255,.15);border-top-color:#ec4899;border-radius:50%;-webkit-animation:sp 1s linear infinite;animation:sp 1s linear infinite;margin-right:1.2vw}
 @-webkit-keyframes sp{to{-webkit-transform:rotate(360deg)}}@keyframes sp{to{transform:rotate(360deg)}}
 /* 設定視窗 */
 #settings{z-index:60;background:rgba(0,0,0,.75);display:none}
 #settings.on{display:block}
-.panel{position:absolute;left:25vw;right:25vw;top:8vh;background:#161622;border:1px solid rgba(255,255,255,.1);border-radius:1.4vw;padding:2.2vw 2.8vw}
-.panel h2{font-size:2vw;margin-bottom:1vw}
-.panel .r{color:#a3a3b8;font-size:1.2vw;margin:.35vw 0}
+.panel{position:absolute;left:22vw;right:22vw;top:5vh;background:#161622;border:1px solid rgba(255,255,255,.1);border-radius:1.4vw;padding:2vw 2.6vw}
+.panel h2{font-size:2vw;margin-bottom:.8vw}
+.panel .r{color:#a3a3b8;font-size:1.15vw;margin:.3vw 0}
 .panel .r b{color:#fff;font-weight:600}
-.panel .btns{margin-top:1.6vw}
-.panel .btn{margin-bottom:.8vw}
+.panel .btns{margin-top:1.2vw}
+.panel .btn{margin-bottom:.7vw}
+/* 螢幕保護（YTmate 開著、5 分鐘沒按鍵也沒在播放） */
+#saver{z-index:120;background:#000;display:none}
+#saver.on{display:block}
+#saver .sv-img{position:absolute;top:0;left:0;width:100%;height:100%;background-size:cover;background-position:center;opacity:0;-webkit-transition:opacity 1.2s;transition:opacity 1.2s}
+#saver .sv-img.on{opacity:1}
+#saver .sv-shade{position:absolute;left:0;right:0;bottom:0;height:60%;background:linear-gradient(0deg,rgba(0,0,0,.9),rgba(0,0,0,0))}
+#saver .sv-clock{position:absolute;right:4vw;top:3vw;font-size:5vw;font-weight:800;text-shadow:0 .3vw 1.5vw rgba(0,0,0,.6)}
+#saver .sv-date{position:absolute;right:4vw;top:9.6vw;font-size:1.5vw;color:#ddd;text-shadow:0 .3vw 1.5vw rgba(0,0,0,.6)}
+#saver .sv-text{position:absolute;left:4vw;right:30vw;bottom:4vw}
+#saver .sv-label{font-size:1.1vw;color:#f9a8d4;font-weight:700;margin-bottom:.5vw}
+#saver .sv-title{font-size:2.6vw;font-weight:800;line-height:1.25}
+#saver .sv-hint{position:absolute;right:4vw;bottom:4vw;font-size:1.1vw;color:#aaa}
 /* 瀏覽器內備用播放器（App 會改用原生播放器） */
 #player{z-index:80;background:#000;display:none}
 #player.on{display:block}
@@ -90,22 +133,26 @@ body{font-size:1.2vw}
 #player.hide-ui .pinfo,#player.hide-ui .pbar{opacity:0}
 /* 舊網頁核心：關掉吃效能的效果 */
 .lite #bgart{display:none}
-.lite .card,.lite .btn{-webkit-transition:none;transition:none}
+.lite .card,.lite .btn,.lite .strip,.lite #saver .sv-img{-webkit-transition:none;transition:none}
 .lite .card.focus .art{box-shadow:0 0 0 .28vw #fff}
-.lite .btn.focus{box-shadow:none}
+.lite .btn.focus,.lite .hero-btn.focus{box-shadow:none}
 </style>
 </head>
 <body>
 <div id="bgart" class="fill"></div><div id="bgshade" class="fill"></div><div id="bgshade2" class="fill"></div>
-<div id="scroller" class="fill">
-  <div class="top row">
-    <div class="brand row"><img src="/assets/tv_icon.png" alt="">YTmate<small>TV</small></div>
-    <div class="topr row"><span class="clock" id="clock"></span><div class="gear f" id="gear" data-act="settings" data-top="1">⚙</div></div>
-  </div>
-  <div id="view"></div>
+<div class="top row">
+  <div class="brand row"><img src="/assets/tv_icon.png" alt="">YTmate<small>TV</small></div>
+  <div class="topr row"><span class="clock" id="clock"></span><div class="gear f" id="gear" data-act="settings" data-top="1">⚙</div></div>
 </div>
+<div id="spot"></div>
+<div id="scroller"><div id="view"></div></div>
 <div id="loading" class="fill"><span class="spin"></span>載入中…</div>
 <div class="toast" id="toast"></div>
+<div id="notice"><img id="noticeImg" alt="" style="display:none"><div id="noticeText"></div></div>
+<div id="saver" class="fill"><div class="sv-img" id="sv0"></div><div class="sv-img" id="sv1"></div><div class="sv-shade"></div>
+  <div class="sv-clock" id="svClock"></div><div class="sv-date" id="svDate"></div>
+  <div class="sv-text"><div class="sv-label" id="svLabel"></div><div class="sv-title" id="svTitle"></div></div>
+  <div class="sv-hint" id="svHint">按任意鍵回到 YTmate</div></div>
 <div id="settings" class="fill"><div class="panel">
   <h2>⚙ 設定</h2>
   <div class="r">伺服器：<b id="srv"></b></div>
@@ -113,9 +160,10 @@ body{font-size:1.2vw}
   <div class="r">電視：<b id="model"></b></div>
   <div class="r">網頁核心：<b id="wv"></b></div>
   <div class="r">可硬體解碼：<b id="decs"></b></div>
-  <div class="r" style="font-size:1vw">原檔格式這台電視解不了時，會自動改播 480p 相容版。</div>
-  <div class="btns"><div class="btn f" data-act="quality" id="qbtn"></div><div class="btn f" data-act="subs" id="sbtn"></div></div>
-  <div class="r" style="font-size:1vw">按確認鍵切換；設定會一直記住，直到你再改。</div>
+  <div class="r">播放暫存：<b id="cacheInfo"></b></div>
+  <div class="r">手機遙控：<b id="remoteInfo"></b></div>
+  <div class="btns"><div class="btn f" data-act="quality" id="qbtn"></div><div class="btn f" data-act="subs" id="sbtn"></div><div class="btn f" data-act="cache" id="cbtn"></div><div class="btn f" data-act="clearcache" id="ccbtn">🧹 清除暫存</div></div>
+  <div class="r" style="font-size:1vw">按確認鍵切換；設定會一直記住，直到你再改。原檔格式這台電視解不了時，會自動改播 480p 相容版。</div>
   <div class="btns"><div class="btn f" data-act="reload">↻ 重新整理</div><div class="btn f" data-act="unpair">⏏ 取消這台電視的配對</div><div class="btn f" data-act="close">返回</div></div>
 </div></div>
 <div id="player" class="fill"><video id="pv"></video><div id="paudio"><img id="pimg" alt=""></div>
@@ -124,17 +172,21 @@ body{font-size:1.2vw}
 'use strict';
 var $ = function (id) { return document.getElementById(id); };
 var NATIVE = window.YTmateTV || null;          // Android App 注入的橋接物件（瀏覽器裡沒有）
-var S = { view: 'home', channels: [], deviceId: '', channel: null, songs: [], playable: [], homeFocus: 0, focusEl: null, prevFocus: null };
+var S = { view: 'home', channels: [], rows: {}, deviceId: '', channel: null, songs: [], playable: [], homeFocus: null, focusEl: null, prevFocus: null,
+  heroIdx: 0, lastKey: Date.now(), visible: true, saverIdle: 5 * 60 * 1000, info: {}, rowItems: {} };
+var SAVER_ONLY = /[?&]saver=1/.test(location.search);    // 系統螢幕保護程式（App 的 DreamService）開的：只顯示螢幕保護
 
 // 舊網頁核心（Chrome 80 以前）→ 輕量模式
 var CHROME = (function () { var m = navigator.userAgent.match(/Chrome\/(\d+)/); return m ? +m[1] : 0; })();
 if (CHROME && CHROME < 80) document.documentElement.className += ' lite';
 function nativeCall(name) { try { return NATIVE && NATIVE[name] ? NATIVE[name]() : ''; } catch (e) { return ''; } }
+function nativeHas(name) { return !!(NATIVE && NATIVE[name]); }
 var DECODERS = nativeCall('decoders');          // App 回報這台電視能硬體解碼的格式，例如 "h264,hevc,vp9"
 // 使用者設定（存在 App 裡，一直記住直到再改；瀏覽器裡存在 localStorage）
 //   quality：auto＝最佳畫質（依電視能力）、low＝480p 省流量（任何電視都能選）
 //   subs：en＝英文字幕優先（預設）、zh＝中文優先、off＝不顯示字幕
-var PREF_DEFAULT = { quality: 'auto', subs: 'en' };
+//   cache：auto＝依電視剩餘空間自動決定播放暫存（最多 500MB）、off＝不暫存（2026-10-17）
+var PREF_DEFAULT = { quality: 'auto', subs: 'en', cache: 'auto' };
 function getPref(k) {
   var v = '';
   try { v = NATIVE && NATIVE.getPref ? NATIVE.getPref(k) : (window.localStorage.getItem('ytmate_' + k) || ''); } catch (e) {}
@@ -145,11 +197,16 @@ function setPref(k, v) {
 }
 var Q_LABEL = { auto: '畫質：自動（最佳）', low: '畫質：480p 省流量' };
 var S_LABEL = { en: '字幕：英文優先', zh: '字幕：中文優先', off: '字幕：關閉' };
+var C_LABEL = { auto: '暫存：自動', off: '暫存：關閉' };
 
 function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
 function abs(u) { return u ? (u.indexOf('http') === 0 ? u : location.protocol + '//' + location.host + u) : ''; }
 function fmtDur(s) { s = Math.max(0, Math.floor(s || 0)); var h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), x = s % 60;
   return (h ? h + ':' + (m < 10 ? '0' : '') + m : m) + ':' + (x < 10 ? '0' : '') + x; }
+function fmtDate(s) {        // "20261016" 或 "2026-10-16 10:00" → "10/16"
+  s = String(s || ''); var m = s.match(/^(\d{4})-?(\d{2})-?(\d{2})/); return m ? (+m[2]) + '/' + (+m[3]) : '';
+}
+function fmtMB(b) { b = +b || 0; return b >= 1073741824 ? (b / 1073741824).toFixed(1) + ' GB' : Math.round(b / 1048576) + ' MB'; }
 function toast(msg, ms) { var t = $('toast'); t.textContent = msg; t.className = 'toast on'; clearTimeout(toast._t); toast._t = setTimeout(function () { t.className = 'toast'; }, ms || 2600); }
 function api(url, opt) {
   return fetch(url, opt || { credentials: 'same-origin' }).then(function (r) {
@@ -161,15 +218,18 @@ function api(url, opt) {
     return r.json().then(function (j) { if (!r.ok || j.error) throw new Error(j.error || ('HTTP ' + r.status)); return j; });
   });
 }
-function tick() { var d = new Date(); $('clock').textContent = (d.getHours() < 10 ? '0' : '') + d.getHours() + ':' + (d.getMinutes() < 10 ? '0' : '') + d.getMinutes(); }
+function postJson(url, body) { return api(url, { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) }); }
+function two(n) { return (n < 10 ? '0' : '') + n; }
+function tick() { var d = new Date(); $('clock').textContent = two(d.getHours()) + ':' + two(d.getMinutes()); }
 setInterval(tick, 10000); tick();
 var GRADS = [['#7c3aed', '#ec4899'], ['#2563eb', '#7c3aed'], ['#db2777', '#f97316'], ['#059669', '#2563eb'], ['#9333ea', '#db2777'], ['#ea580c', '#e11d48']];
 function grad(i) { var g = GRADS[i % GRADS.length]; return 'background:' + g[0] + ';background:linear-gradient(135deg,' + g[0] + ',' + g[1] + ')'; }
 function closestF(el) { while (el && el !== document) { if (el.className && (' ' + el.className + ' ').indexOf(' f ') >= 0) return el; el = el.parentNode; } return null; }
+function isOn(id) { return $(id).className.indexOf('on') >= 0; }
 
 // ══ 遙控器：上下左右在畫面上找最近的可選項目（空間導覽）══
 function focusables() {
-  var root = $('settings').className.indexOf('on') >= 0 ? $('settings') : document;
+  var root = isOn('settings') ? $('settings') : document;
   var all = root.querySelectorAll('.f'), out = [];
   for (var i = 0; i < all.length; i++) if (all[i].offsetParent !== null && !(root === document && closestIn(all[i], 'settings'))) out.push(all[i]);
   return out;
@@ -179,22 +239,44 @@ function setFocus(el, noScroll) {
   if (!el) return;
   if (S.focusEl) S.focusEl.className = S.focusEl.className.replace(/\s*\bfocus\b/g, '');
   S.focusEl = el; el.className += ' focus';
+  if (el.getAttribute('data-row') != null) scrollRow(el);
   if (!noScroll) scrollToEl(el);
-  if (el.getAttribute('data-hero') != null) showHero(+el.getAttribute('data-hero'));
+  onFocusChanged(el);
 }
 function scrollToEl(el) {
-  var sc = $('scroller'), r = el.getBoundingClientRect(), vh = window.innerHeight;
-  if (el.getAttribute('data-top') === '1') { sc.scrollTop = 0; return; }
-  if (r.top < vh * 0.22) sc.scrollTop += r.top - vh * 0.22;
-  else if (r.bottom > vh * 0.92) sc.scrollTop += r.bottom - vh * 0.92;
+  var sc = $('scroller');
+  if (el.getAttribute('data-top') === '1' || !closestIn(el, 'scroller')) { if (el.getAttribute('data-top') === '1') sc.scrollTop = 0; return; }
+  var r = el.getBoundingClientRect(), b = sc.getBoundingClientRect(), pad = window.innerWidth * 0.012;
+  if (r.top < b.top + pad) sc.scrollTop += r.top - b.top - pad;
+  else if (r.bottom > b.bottom - pad) sc.scrollTop += r.bottom - b.bottom + pad;
+}
+// 一排裡左右移動：焦點卡片一定看得到（整排往左／右平移）
+function scrollRow(el) {
+  var strip = el.parentNode, k = +el.getAttribute('data-k') || 0, cards = strip.children;
+  if (!cards.length) return;
+  var w = cards[0].getBoundingClientRect().width / 1.0001, step = w + window.innerWidth * 0.012;
+  var vis = Math.max(1, Math.floor((window.innerWidth * 0.93) / step)), first = +(strip.getAttribute('data-first') || 0);
+  if (k < first) first = k; else if (k > first + vis - 1) first = k - vis + 1;
+  strip.setAttribute('data-first', first);
+  var x = -first * step;
+  strip.style.webkitTransform = 'translateX(' + x + 'px)'; strip.style.transform = 'translateX(' + x + 'px)';
 }
 function move(dir) {
   var cur = S.focusEl, list = focusables();
   if (!cur || list.indexOf(cur) < 0) { setFocus(list[0]); return; }
+  if (cur.getAttribute('data-act') === 'hero' && (dir === 'L' || dir === 'R')) { heroGo(dir === 'R' ? 1 : -1); return; }
+  // 同一排裡左右移動：直接取前一張／下一張（不用算座標，畫面外的卡片也找得到）
+  if ((dir === 'L' || dir === 'R') && cur.getAttribute('data-row') != null) {
+    var sib = dir === 'R' ? cur.nextElementSibling : cur.previousElementSibling;
+    if (sib) setFocus(sib);
+    return;
+  }
   var a = cur.getBoundingClientRect(), ax = a.left + a.width / 2, ay = a.top + a.height / 2, best = null, bestScore = 1e9;
   for (var i = 0; i < list.length; i++) {
     var e = list[i]; if (e === cur) continue;
-    var b = e.getBoundingClientRect(), bx = b.left + b.width / 2, by = b.top + b.height / 2, dx = bx - ax, dy = by - ay, main = 0, cross = 0;
+    var b = e.getBoundingClientRect();
+    if (e.getAttribute('data-row') != null && (b.left < -2 || b.right > window.innerWidth + 2)) continue;   // 換排時只看畫面上看得到的卡片
+    var bx = b.left + b.width / 2, by = b.top + b.height / 2, dx = bx - ax, dy = by - ay, main = 0, cross = 0;
     if (dir === 'L') { if (b.right > a.left + 2 && dx >= -2) continue; main = -dx; cross = Math.abs(dy); }
     if (dir === 'R') { if (b.left < a.right - 2 && dx <= 2) continue; main = dx; cross = Math.abs(dy); }
     if (dir === 'U') { if (b.bottom > a.top + 2 && dy >= -2) continue; main = -dy; cross = Math.abs(dx); }
@@ -202,6 +284,12 @@ function move(dir) {
     if (main <= 0) continue;
     var score = main + cross * ((dir === 'L' || dir === 'R') ? 3 : 0.8);
     if (score < bestScore) { bestScore = score; best = e; }
+  }
+  // 首頁：從最上面一排往上 → 回到大橫幅（焦點離開大橫幅時，上方區域改顯示選到的影片，按鈕暫時不在）
+  if (dir === 'U' && S.view === 'home' && heroItems().length && closestIn(cur, 'scroller') && (!best || best.id === 'gear')) {
+    $('scroller').scrollTop = 0; S.focusEl.className = S.focusEl.className.replace(/\s*\bfocus\b/g, ''); S.focusEl = null;
+    showHeroSlide(); setFocus($('heroBtn'));
+    return;
   }
   if (best) setFocus(best);
 }
@@ -221,43 +309,57 @@ function keyName(e) {
   return '';
 }
 document.addEventListener('keydown', function (e) {
+  S.lastKey = Date.now();
+  if (isOn('saver')) { e.preventDefault(); if (!SAVER_ONLY) hideSaver(); return; }   // 螢幕保護中：任何鍵只用來關掉它
   var k = keyName(e); if (!k) return;
   e.preventDefault();
-  if ($('player').className.indexOf('on') >= 0) { playerKey(k); return; }
+  if (isOn('player')) { playerKey(k); return; }
   if (k === 'L' || k === 'R' || k === 'U' || k === 'D') move(k);
   else if (k === 'OK') activate(S.focusEl);
   else if (k === 'BACK') { if (!window.tvBack() && !NATIVE) toast('已經在首頁'); }
   else if (k === 'MENU') window.tvMenu();
 });
-document.addEventListener('click', function (e) { var el = closestF(e.target); if (el) { setFocus(el, true); activate(el); } });
+document.addEventListener('click', function (e) { S.lastKey = Date.now(); if (isOn('saver')) { hideSaver(); return; } var el = closestF(e.target); if (el) { setFocus(el, true); activate(el); } });
 
 // App 的「返回鍵」會呼叫這個：回傳 true＝頁面自己處理了；false＝已在首頁，交給 App（再按一次離開）
 window.tvBack = function () {
-  if ($('player').className.indexOf('on') >= 0) { closePlayer(); return true; }
-  if ($('settings').className.indexOf('on') >= 0) { closeSettings(); return true; }
+  S.lastKey = Date.now();
+  if (isOn('saver')) { hideSaver(); return true; }
+  if (isOn('player')) { closePlayer(); return true; }
+  if (isOn('settings')) { closeSettings(); return true; }
   if (S.view === 'channel') { renderHome(); return true; }
   return false;
 };
 // 選單鍵：開／關設定（App 攔下遙控器的選單鍵後呼叫這個）
 window.tvMenu = function () {
-  if ($('player').className.indexOf('on') >= 0) return true;
-  if ($('settings').className.indexOf('on') >= 0) closeSettings(); else openSettings();
+  S.lastKey = Date.now();
+  if (isOn('saver')) { hideSaver(); return true; }
+  if (isOn('player')) return true;
+  if (isOn('settings')) closeSettings(); else openSettings();
   return true;
 };
-// 從原生播放器回來時 App 會呼叫這個：重新整理頻道（480p 相容版可能剛轉好）、焦點停在最後播放的那一支
+// 從原生播放器回來時 App 會呼叫這個：重新整理頻道（480p 相容版可能剛轉好、看到哪裡也更新）、焦點停在最後播放的那一支
 window.tvAfterPlay = function (vid) {
+  S.lastKey = Date.now(); hideSaver();
   if (S.view === 'channel' && S.channel && vid) { S.refreshing = true; openChannel(S.channel.id, vid, true); }
+  else if (S.view === 'home') { S.refreshing = true; loadHome(vid); }
   return true;
 };
+// App 告訴頁面「現在看得到／看不到」（播放器蓋在上面時看不到 → 不啟動螢幕保護、大橫幅不輪播）
+window.tvVisible = function (v) { S.visible = !!v; S.lastKey = Date.now(); if (!v) hideSaver(); return true; };
 // 給自動測試讀目前狀態（不影響使用）
 window.tvState = function () { return JSON.stringify({ view: S.view, focusAct: S.focusEl && S.focusEl.getAttribute('data-act'), focusId: S.focusEl && S.focusEl.getAttribute('data-id'),
-  focusI: S.focusEl && S.focusEl.getAttribute('data-i'), scrollTop: $('scroller').scrollTop, lite: document.documentElement.className.indexOf('lite') >= 0, decoders: DECODERS, chrome: CHROME, busy: !!S.refreshing }); };
+  focusI: S.focusEl && S.focusEl.getAttribute('data-i'), focusVid: S.focusEl && S.focusEl.getAttribute('data-vid'), focusRow: S.focusEl && S.focusEl.getAttribute('data-row'),
+  scrollTop: $('scroller').scrollTop, lite: document.documentElement.className.indexOf('lite') >= 0, decoders: DECODERS, chrome: CHROME, busy: !!S.refreshing,
+  rows: Object.keys(S.rowItems), saver: isOn('saver'), notice: isOn('notice') ? $('noticeText').textContent : '', spot: ($('spot').textContent || '').slice(0, 200), heroIdx: S.heroIdx }); };
 
 function activate(el) {
   if (!el) return;
   var act = el.getAttribute('data-act');
   if (act === 'channel') openChannel(el.getAttribute('data-id'));
   else if (act === 'song') playFrom(+el.getAttribute('data-i'), false);
+  else if (act === 'rowcard') playRow(el.getAttribute('data-row'), +el.getAttribute('data-k'));
+  else if (act === 'hero') playRow('hero', S.heroIdx);
   else if (act === 'playall') playFrom(0, false);
   else if (act === 'shuffle') playFrom(0, true);
   else if (act === 'settings') openSettings();
@@ -266,72 +368,205 @@ function activate(el) {
   else if (act === 'unpair') unpair();
   else if (act === 'quality') { setPref('quality', getPref('quality') === 'low' ? 'auto' : 'low'); prefLabels(); S.prefChanged = true; toast(Q_LABEL[getPref('quality')]); }
   else if (act === 'subs') { var o = ['en', 'zh', 'off'], c = getPref('subs'); setPref('subs', o[(o.indexOf(c) + 1) % 3]); prefLabels(); toast(S_LABEL[getPref('subs')]); }
+  else if (act === 'cache') { setPref('cache', getPref('cache') === 'off' ? 'auto' : 'off'); prefLabels(); toast(C_LABEL[getPref('cache')] + '（下次播放時生效）'); }
+  else if (act === 'clearcache') { var freed = 0; try { freed = NATIVE && NATIVE.clearCache ? +NATIVE.clearCache() : 0; } catch (e) {} prefLabels(); toast('已清除播放暫存' + (freed ? '（' + fmtMB(freed) + '）' : '')); }
 }
 
-// ══ 首頁：每個頻道一張大卡片 ══
-function showHero(i) {
-  var c = S.view === 'home' ? S.channels[i] : null; if (!c) return;
-  $('htitle').textContent = c.name;
-  $('hmeta').innerHTML = '<b>頻道</b>' + c.song_count + ' 支影片';
-  $('hdesc').textContent = c.description || '';
-  var art = c.cover || c.thumbs[0];
-  $('bgart').style.backgroundImage = art ? 'url("' + art + '")' : 'none';
-  S.homeFocus = i;
+// ══ 上方焦點資訊區 ══
+function onFocusChanged(el) {
+  var act = el.getAttribute('data-act');
+  if (act === 'hero') { S.homeFocus = { act: 'hero' }; showHeroSlide(); return; }
+  if (act === 'channel') { var c = S.channels[+el.getAttribute('data-ci')]; if (c) { showChannelSpot(c); S.homeFocus = { act: 'channel', id: c.id }; } return; }
+  if (act === 'rowcard') {
+    var it = (S.rowItems[el.getAttribute('data-row')] || [])[+el.getAttribute('data-k')];
+    if (it) { showVideoSpot(it, el.getAttribute('data-row')); S.homeFocus = { act: 'rowcard', row: el.getAttribute('data-row'), vid: it.video_id }; }
+    return;
+  }
+  if (act === 'song') { var s = S.songs[+el.getAttribute('data-si')]; if (s) showVideoSpot(s, 'channel'); return; }
+  if (S.view === 'channel' && (act === 'playall' || act === 'shuffle') && S.channel) showChannelSpot(S.channel, true);
 }
+// 上方大圖：左邊與下面淡出（舊核心不支援遮罩時只是邊緣比較硬）
+function spImg(url, op) { return url ? '<div class="sp-wrap"' + (op ? ' style="opacity:' + op + '"' : '') + '><div class="sp-img" style="background-image:url(\'' + esc(url) + '\')"></div></div>' : ''; }
+function setBg(url) { $('bgart').style.backgroundImage = url ? 'url("' + url + '")' : 'none'; }
+var ROW_LABEL = { hero: '最新節目', cont: '繼續觀看', recent: '最新同步', shows: '我的節目' };
+function heroItems() { return S.rowItems.hero || []; }
+function showHeroSlide() {
+  var list = heroItems(), it = list[S.heroIdx];
+  if (!it) { showChannelSpot(S.channels[0] || { name: 'YTmate', song_count: 0 }); return; }
+  var dots = '<span class="dots">' + list.map(function (x, i) { return '<i' + (i === S.heroIdx ? ' class="on"' : '') + '></i>'; }).join('') + '</span>';
+  $('spot').className = 'hero-on';
+  $('spot').innerHTML = spImg(it.thumb) +
+    '<div class="sp-text"><div class="sp-label">🎙️ 最新節目 ' + (S.heroIdx + 1) + ' / ' + list.length + '</div><h1>' + esc(it.title) + '</h1>' +
+    '<div class="sp-meta">' + metaHtml(it) + '</div>' +
+    (it.description ? '<div class="sp-desc" style="-webkit-line-clamp:2;min-height:0">' + esc(it.description) + '</div>' : '') +
+    '<div class="hero-btn f' + (S.focusEl && S.focusEl.getAttribute('data-act') === 'hero' ? ' focus' : '') + '" data-act="hero" id="heroBtn">▶ 立即播放</div>' + dots + '<span style="margin-left:1vw;color:#9a9ab0;font-size:1vw">左右鍵切換</span></div>';
+  // 焦點元素被重畫了：重新指到新的按鈕
+  if (S.focusEl && S.focusEl.getAttribute('data-act') === 'hero') { S.focusEl = $('heroBtn'); }
+  setBg(it.thumb);
+}
+function heroGo(d) {
+  var n = heroItems().length; if (!n) return;
+  S.heroIdx = (S.heroIdx + d + n) % n; showHeroSlide();
+}
+function metaHtml(it) {
+  var a = [];
+  if (it.channel_name) a.push('<span>' + esc(it.channel_name) + '</span>');
+  var d = fmtDate(it.published_at || it.added_at); if (d) a.push('<span>' + d + '</span>');
+  if (it.duration) a.push('<span>' + fmtDur(it.duration) + '</span>');
+  if (it.resume > 0 && !it.watched) a.push('<span style="color:#f9a8d4">看到 ' + fmtDur(it.resume) + '</span>');
+  else if (it.watched) a.push('<span>✓ 看過</span>');
+  return a.join('');
+}
+function showChannelSpot(c, withButtons) {
+  $('spot').className = '';
+  var art = c.cover || (c.thumbs && c.thumbs[0]);
+  $('spot').innerHTML = spImg(art, .55) +
+    '<div class="sp-text"><div class="sp-label">頻道</div><h1>' + esc(c.name) + '</h1><div class="sp-meta"><span>' + (c.song_count || 0) + ' 支影片</span>' +
+    (c.playable != null && c.playable < c.song_count ? '<span>' + c.playable + ' 支可播放</span>' : '') + '</div>' +
+    (c.description ? '<div class="sp-desc">' + esc(c.description) + '</div>' : '') + '</div>';
+  setBg(art);
+  if (S.view === 'channel') addChannelButtons();
+}
+// 選到一支影片：標題、頻道、日期、長度、字幕語言、480p、看到哪裡＋AI 中文摘要（慢慢載入，有快取）
+function showVideoSpot(it, row) {
+  var vid = it.video_id, inf = S.info[vid];
+  $('spot').className = '';
+  var subs = it.subtitles ? Object.keys(it.subtitles) : (inf ? inf.subtitles : []);
+  var hasEn = false, hasZh = false;
+  for (var i = 0; i < (subs || []).length; i++) { if (subs[i].indexOf('en') === 0) hasEn = true; if (subs[i].indexOf('zh') === 0) hasZh = true; }
+  var chips = (hasEn ? '<span class="chip">EN 字幕</span>' : '') + (hasZh ? '<span class="chip">中文字幕</span>' : '') +
+    (it.sources && it.sources[0] && it.sources[0].kind === 'low' ? '<span class="chip">480p</span>' : '') + (it.audio_only ? '<span class="chip">🎵 音樂</span>' : '');
+  var label = row === 'channel' ? (S.channel ? S.channel.name : '影片') : (ROW_LABEL[row] || '影片');
+  var thumb = it.thumb || it.thumb_file;
+  var prog = it.resume > 0 && !it.watched && (it.duration || it.resume_dur) ? '<div class="sp-prog"><i style="width:' + Math.min(100, it.resume / (it.duration || it.resume_dur) * 100) + '%"></i></div>' : '';
+  var desc = inf ? (inf.summary || '（這支影片還沒有摘要）') : (it.description || '');
+  $('spot').innerHTML = spImg(thumb) +
+    '<div class="sp-text"><div class="sp-label">' + esc(label) + (it.is_new ? '・新' : '') + '</div><h1>' + esc(it.title) + '</h1>' +
+    '<div class="sp-meta">' + metaHtml(it) + chips + '</div>' + prog +
+    '<div class="sp-desc" id="spDesc">' + esc(desc) + '</div></div>';
+  setBg(thumb);
+  if (S.view === 'channel') addChannelButtons();
+  if (!inf) loadInfo(vid);
+}
+function addChannelButtons() {
+  if (!S.channel || $('spot').querySelector('[data-act="playall"]')) return;
+  var t = $('spot').querySelector('.sp-text'); if (!t) return;
+  var d = document.createElement('div'); d.className = 'btns';
+  var fa = S.focusEl && S.focusEl.getAttribute('data-act');
+  d.innerHTML = '<div class="btn f' + (fa === 'playall' ? ' focus' : '') + '" data-act="playall">▶ 全部播放</div><div class="btn f' + (fa === 'shuffle' ? ' focus' : '') + '" data-act="shuffle">🔀 隨機播放</div>';
+  var desc = t.querySelector('.sp-desc'); if (desc) desc.style.webkitLineClamp = 2;
+  t.appendChild(d);
+  if (fa === 'playall' || fa === 'shuffle') S.focusEl = d.querySelector('.focus');
+}
+var infoTimer = null;
+function loadInfo(vid) {
+  clearTimeout(infoTimer);
+  infoTimer = setTimeout(function () {
+    api('/api/tv/info/' + encodeURIComponent(vid) + (S.channel ? '?ch=' + encodeURIComponent(S.channel.id) : '')).then(function (j) {
+      S.info[vid] = j;
+      var cur = S.focusEl && (S.focusEl.getAttribute('data-vid') || '');
+      if (cur === vid && $('spDesc')) $('spDesc').textContent = j.summary || '（這支影片還沒有摘要）';
+    }).catch(function () {});
+  }, 350);
+}
+
+// ══ 首頁：大橫幅＋一排一排＋頻道卡片 ══
 function channelArt(c, i) {
   if (c.cover) return '<img src="' + esc(c.cover) + '" alt="">';
   if (c.thumbs.length >= 4) return '<div class="collage">' + c.thumbs.slice(0, 4).map(function (t) { return '<img src="' + esc(t) + '" alt="">'; }).join('') + '</div>';
   if (c.thumbs.length) return '<img src="' + esc(c.thumbs[0]) + '" alt="">';
   return '<div class="ph" style="' + grad(i) + '">' + esc((c.name || '?').replace(/^[^\w一-鿿]+/, '').slice(0, 1)) + '</div>';
 }
-function renderHome() {
-  S.view = 'home'; S.channel = null;
-  var h = '<div class="hero"><h1 id="htitle"></h1><div class="meta" id="hmeta"></div><div class="desc" id="hdesc"></div></div>';
+function videoCard(it, row, k) {
+  var pct = it.resume > 0 && !it.watched && (it.duration || it.resume_dur) ? Math.min(100, it.resume / (it.duration || it.resume_dur) * 100) : 0;
+  return '<div class="card f' + (it.watched && row !== 'cont' ? ' seen' : '') + '" data-act="rowcard" data-row="' + row + '" data-k="' + k + '" data-vid="' + esc(it.video_id) + '">' +
+    '<div class="art" style="' + grad(k) + '">' + (it.thumb ? '<img src="' + esc(it.thumb) + '" alt="">' : '<div class="ph">♪</div>') +
+    (it.duration ? '<div class="dur">' + fmtDur(it.duration) + '</div>' : '') + (it.is_new ? '<div class="badge new">新</div>' : '') +
+    (pct ? '<div class="prog"><i style="width:' + pct + '%"></i></div>' : '') + '</div>' +
+    '<div class="t">' + esc(it.title) + '</div><div class="sub">' + esc(it.channel_name || '') + '</div></div>';
+}
+function rowHtml(key, title, items) {
+  if (!items || !items.length) return '';
+  S.rowItems[key] = items;
+  return '<div class="sec-title">' + title + '</div><div class="rowwrap"><div class="strip" data-strip="' + key + '">' +
+    items.map(function (it, k) { return videoCard(it, key, k); }).join('') + '</div></div>';
+}
+function renderHome(focusVid) {
+  S.view = 'home'; S.channel = null; S.rowItems = {};
+  var R = S.rows || {}, h = '';
+  if (R.hero && R.hero.length) S.rowItems.hero = R.hero;
+  if (S.heroIdx >= heroItems().length) S.heroIdx = 0;
+  h += rowHtml('cont', '▶ 繼續觀看', R.cont);
+  h += rowHtml('recent', '🆕 最新同步', R.recent);
+  h += rowHtml('shows', '🎙️ 我的節目', R.shows);
   if (!S.channels.length) h += '<div class="empty">還沒有任何頻道。請先在 YTmate 網頁加入影片。</div>';
-  else h += '<div class="sec-title">我的頻道</div><div class="grid">' + S.channels.map(function (c, i) {
-    return '<div class="card f" data-act="channel" data-id="' + esc(c.id) + '" data-hero="' + i + '"' + (i < 4 ? ' data-top="1"' : '') + '>' +
+  else h += '<div class="sec-title">📺 我的頻道</div><div class="grid">' + S.channels.map(function (c, i) {
+    return '<div class="card f" data-act="channel" data-id="' + esc(c.id) + '" data-ci="' + i + '">' +
       '<div class="art" style="' + grad(i) + '">' + channelArt(c, i) + '<div class="shade"></div><div class="name">' + esc(c.name) + '</div>' +
       '<div class="count">' + c.song_count + '</div></div></div>';
   }).join('') + '</div>';
   $('view').innerHTML = h;
-  var cards = document.querySelectorAll('.grid .card');
-  setFocus(cards[Math.min(S.homeFocus, cards.length - 1)] || $('gear'));
+  if (heroItems().length) showHeroSlide(); else showChannelSpot(S.channels[0] || { name: 'YTmate', song_count: 0 });
+  // 焦點：剛播完的那支 → 原本選的 → 大橫幅 → 第一排第一張 → 第一個頻道
+  var target = null, f = S.homeFocus;
+  if (focusVid) target = document.querySelector('#view .card[data-vid="' + focusVid + '"]');
+  if (!target && f && f.act === 'rowcard') target = document.querySelector('#view .card[data-row="' + f.row + '"][data-vid="' + f.vid + '"]') ||
+    document.querySelector('#view .card[data-row="' + f.row + '"]');
+  if (!target && f && f.act === 'channel') target = document.querySelector('#view .card[data-act="channel"][data-id="' + f.id + '"]');
+  if (!target && (!f || f.act === 'hero')) target = $('heroBtn');
+  if (!target) target = document.querySelector('#view .card') || $('gear');
+  setFocus(target);
+  if (!SAVER_ONLY) startHeroTimer();
 }
-function loadHome() {
-  return api('/api/tv/home').then(function (j) { S.channels = j.channels; S.deviceId = j.device_id || ''; renderHome(); })
+function loadHome(focusVid) {
+  return api('/api/tv/home').then(function (j) { S.channels = j.channels; S.rows = j.rows || {}; S.deviceId = j.device_id || ''; renderHome(focusVid); })
     .catch(function (e) { $('view').innerHTML = '<div class="empty">⚠ 載入失敗：' + esc(e.message) + '<br><br>請確認網路連線，按 ⚙ → 重新整理。</div>'; setFocus($('gear')); })
-    .then(function () { $('loading').style.display = 'none'; });
+    .then(function () { $('loading').style.display = 'none'; S.refreshing = false; });
+}
+// 大橫幅自動輪播（焦點不在大橫幅上、畫面看得到時，每 8 秒換一張）
+function startHeroTimer() {
+  clearInterval(S.heroT);
+  S.heroT = setInterval(function () {
+    if (S.view !== 'home' || !S.visible || isOn('saver') || isOn('settings') || heroItems().length < 2) return;
+    var fa = S.focusEl && S.focusEl.getAttribute('data-act');
+    if (fa === 'hero') return;
+    if (fa === 'rowcard' || fa === 'channel') { S.heroIdx = (S.heroIdx + 1) % heroItems().length; return; }   // 焦點在別處：只換索引，回到大橫幅時看到下一張
+    heroGo(1);
+  }, 8000);
 }
 
 // ══ 頻道頁：影片卡片（伺服器依這台電視的解碼能力排好每支影片的播放順序）══
-function openChannel(id, focusVid, quiet) {
-  if (!quiet) $('loading').style.display = 'block';
-  var c = S.channels.filter(function (x) { return x.id === id; })[0] || { id: id, name: '', song_count: 0 };
+function decQs() {
   var qs = [];
   if (DECODERS) qs.push('dec=' + encodeURIComponent(DECODERS));
   if (getPref('quality') === 'low') qs.push('q=low');
-  api('/api/tv/channel/' + encodeURIComponent(id) + (qs.length ? '?' + qs.join('&') : '')).then(function (j) {
-    S.view = 'channel'; S.channel = c; S.songs = j.songs || [];
+  return qs;
+}
+function openChannel(id, focusVid, quiet) {
+  if (!quiet) $('loading').style.display = 'block';
+  var c = S.channels.filter(function (x) { return x.id === id; })[0] || { id: id, name: '', song_count: 0, thumbs: [] };
+  var qs = decQs();
+  return api('/api/tv/channel/' + encodeURIComponent(id) + (qs.length ? '?' + qs.join('&') : '')).then(function (j) {
+    S.view = 'channel'; S.channel = c; S.songs = j.songs || []; S.rowItems = {};
+    if (!c.name) c.name = j.name || '';
+    c.song_count = S.songs.length;
     var playable = S.songs.filter(function (s) { return s.sources && s.sources.length; });
-    S.playable = playable;
-    var h = '<div class="hero"><h1>' + esc(c.name) + '</h1><div class="meta"><b>頻道</b>' + S.songs.length + ' 支影片' +
-      (playable.length < S.songs.length ? '（' + playable.length + ' 支可播放）' : '') + '</div>' +
-      (c.description ? '<div class="desc">' + esc(c.description) + '</div>' : '') +
-      '<div class="btns"><div class="btn f" data-act="playall" data-top="1">▶ 全部播放</div><div class="btn f" data-act="shuffle" data-top="1">🔀 隨機播放</div></div></div>';
+    S.playable = playable; c.playable = playable.length;
+    var h = '';
     if (!S.songs.length) h += '<div class="empty">這個頻道還沒有影片</div>';
     else h += '<div class="grid songs">' + S.songs.map(function (s, i) {
       var ok = s.sources && s.sources.length, pi = ok ? playable.indexOf(s) : -1, first = ok ? s.sources[0].kind : '';
       var badge = !ok ? '<div class="badge gray">尚未下載</div>' : s.audio_only ? '<div class="badge">🎵 音樂</div>' :
-        first === 'low' ? '<div class="badge compat">480p</div>' : s.need_low ? '<div class="badge gray">轉檔中</div>' : '';
-      return '<div class="card f' + (ok ? '' : ' dim') + '" data-act="song" data-i="' + pi + '" data-vid="' + esc(s.video_id) + '">' +
+        first === 'low' ? '<div class="badge compat">480p</div>' : s.need_low ? '<div class="badge gray">轉檔中</div>' : s.is_new ? '<div class="badge new">新</div>' : '';
+      var pct = s.resume > 0 && !s.watched && (s.duration || s.resume_dur) ? Math.min(100, s.resume / (s.duration || s.resume_dur) * 100) : 0;
+      return '<div class="card f' + (ok ? '' : ' dim') + (s.watched ? ' seen' : '') + '" data-act="song" data-i="' + pi + '" data-si="' + i + '" data-vid="' + esc(s.video_id) + '">' +
         '<div class="art" style="' + grad(i) + '">' + (s.thumb_file ? '<img src="' + esc(s.thumb_file) + '" alt="">' : '<div class="ph">♪</div>') +
-        (s.duration ? '<div class="dur">' + fmtDur(s.duration) + '</div>' : '') + badge + '</div>' +
+        (s.duration ? '<div class="dur">' + fmtDur(s.duration) + '</div>' : '') + badge + (pct ? '<div class="prog"><i style="width:' + pct + '%"></i></div>' : '') + '</div>' +
         '<div class="t">' + esc(s.title || s.video_id) + '</div></div>';
     }).join('') + '</div>';
     $('view').innerHTML = h; $('scroller').scrollTop = 0;
-    var bg = c.cover || (S.songs[0] && S.songs[0].thumb_file);
-    $('bgart').style.backgroundImage = bg ? 'url("' + bg + '")' : 'none';
-    var pa = document.querySelector('.btn[data-act="playall"]'), last = null;
+    showChannelSpot(c);
+    var pa = $('spot').querySelector('[data-act="playall"]'), last = null;
     if (focusVid) { var cs = document.querySelectorAll('.grid.songs .card'); for (var q = 0; q < cs.length; q++) if (cs[q].getAttribute('data-vid') === focusVid) last = cs[q]; }
     setFocus(last || (playable.length ? pa : (document.querySelector('.grid .card') || pa)));
   }).catch(function (e) { if (!quiet) toast('載入失敗：' + e.message); }).then(function () { $('loading').style.display = 'none'; S.refreshing = false; });
@@ -349,22 +584,57 @@ function subList(subs) {
   return out;
 }
 function pickSub(subs) { var l = subList(subs); return l.length ? l[0] : null; }   // 舊版 App 只認一個字幕
+// 頻道頁的「全部播放」「隨機播放」、點某一支
 function playFrom(i, shuffle) {
   var list = S.playable.slice();
   if (i < 0 || !list.length) { toast('這支影片還沒有下載到伺服器，無法播放'); return; }
+  playSongs(list, i, { shuffle: shuffle, artist: S.channel ? S.channel.name : '' });
+}
+// 一份播放資料（伺服器排好每支的版本）交給播放器。opt：shuffle、startPos（秒，第一支從這裡開始）、artist、remoteId、title
+function playSongs(list, i, opt) {
+  opt = opt || {};
+  list = list.filter(function (s) { return s.sources && s.sources.length; });
+  if (!list.length) { remoteAck(opt.remoteId, false, '這些影片還沒有下載到伺服器'); toast('這些影片還沒有下載到伺服器，無法播放'); return false; }
+  i = Math.max(0, Math.min(i || 0, list.length - 1));
   var items = list.map(function (s) {
     var srcs = s.sources.map(function (x) { return { url: abs(x.url), kind: x.kind, codec: x.codec || '' }; });
     return { url: srcs[0].url, audio: srcs[0].kind === 'audio', sources: srcs, note: s.note || '', video_id: s.video_id,
-      title: s.title || s.video_id, artist: S.channel ? S.channel.name : '', thumb: abs(s.thumb_file), duration: s.duration || 0,
-      sub: pickSub(s.subtitles), subs: subList(s.subtitles), subPref: getPref('subs') };
+      title: s.title || s.video_id, artist: s.channel_name || opt.artist || '', thumb: abs(s.thumb_file), duration: s.duration || 0,
+      sub: pickSub(s.subtitles), subs: subList(s.subtitles), subPref: getPref('subs'),
+      // 2026-10-17：看到哪裡以伺服器為準（電視、網頁、其他電視共用）；App 會跟自己記的比，取比較新的
+      resume: s.watched ? 0 : (s.resume || 0), resumeAt: s.resume_at || 0 };
   });
-  if (shuffle) { for (var k = items.length - 1; k > 0; k--) { var r = Math.floor(Math.random() * (k + 1)), t = items[k]; items[k] = items[r]; items[r] = t; } i = 0; }
+  if (opt.shuffle) { for (var k = items.length - 1; k > 0; k--) { var r = Math.floor(Math.random() * (k + 1)), t = items[k]; items[k] = items[r]; items[r] = t; } i = 0; }
   // 這台電視需要 480p 但還沒轉好的（目前這支＋接下來 2 支）→ 請伺服器在背景轉檔
   var need = [];
   for (var n = i; n < Math.min(items.length, i + 3); n++) { var so = list.filter(function (x) { return x.video_id === items[n].video_id; })[0]; if (so && so.need_low) need.push(so.video_id); }
   if (need.length) fetch('/api/tv/prepare', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ video_ids: need }) }).catch(function () {});
-  if (NATIVE && NATIVE.play) { try { NATIVE.play(JSON.stringify({ items: items, start: i })); return; } catch (e) { toast('原生播放器啟動失敗，改用網頁播放'); } }
+  var payload = { items: items, start: i, title: opt.title || '' };
+  if (opt.startPos > 0) payload.startPos = Math.round(opt.startPos * 1000);
+  if (NATIVE && NATIVE.play) {
+    try { NATIVE.play(JSON.stringify(payload)); remoteAck(opt.remoteId, true, '開始播放：' + items[i].title); return true; }
+    catch (e) { toast('原生播放器啟動失敗，改用網頁播放'); }
+  }
   webPlay(items, i);
+  remoteAck(opt.remoteId, true, '開始播放（網頁播放器）');
+  return true;
+}
+// 幾支影片（依 video_id）→ 跟伺服器拿這台電視的播放資料 → 播放
+function playVideos(vids, startVid, opt) {
+  return postJson('/api/tv/videos', { video_ids: vids, dec: DECODERS, q: getPref('quality') }).then(function (j) {
+    var songs = j.songs || [], idx = 0;
+    var playable = songs.filter(function (s) { return s.sources && s.sources.length; });
+    for (var k = 0; k < playable.length; k++) if (playable[k].video_id === startVid) idx = k;
+    return playSongs(playable, idx, opt);
+  });
+}
+// 首頁某一排的卡片：從這張開始，把這一排接著播
+function playRow(row, k) {
+  var items = S.rowItems[row] || []; if (!items[k]) return;
+  var vids = items.map(function (x) { return x.video_id; });
+  $('loading').style.display = 'block';
+  playVideos(vids, items[k].video_id, { title: ROW_LABEL[row] || '' }).catch(function (e) { toast('播放失敗：' + e.message); })
+    .then(function () { $('loading').style.display = 'none'; });
 }
 var P = { items: [], i: 0, si: 0, hideT: null };
 function webPlay(items, i) { P.items = items; P.i = i; $('player').className = 'fill on'; loadItem(0); }
@@ -400,6 +670,85 @@ function playerKey(k) {
   else if (k === 'BACK') closePlayer();
 }
 
+// ══ 📱 手機遙控（2026-10-17）：App 領到指令後呼叫這些 ══
+function remoteAck(id, ok, msg) { if (!id) return; try { if (NATIVE && NATIVE.remoteAck) NATIVE.remoteAck(id, !!ok, String(msg || '')); } catch (e) {} }
+// 播放指令：{id, args: {video_ids | channel_id, start_vid, shuffle, start_pos, title}}
+window.tvRemote = function (json) {
+  var c; try { c = typeof json === 'string' ? JSON.parse(json) : json; } catch (e) { return false; }
+  var a = c.args || {};
+  S.lastKey = Date.now(); hideSaver();
+  if (isOn('settings')) closeSettings();
+  var opt = { remoteId: c.id, startPos: a.start_pos || 0, shuffle: !!a.shuffle, title: a.title || '' };
+  var p;
+  if (a.video_ids && a.video_ids.length) p = playVideos(a.video_ids, a.start_vid || a.video_ids[0], opt);
+  else if (a.channel_id) {
+    var qs = decQs();
+    p = api('/api/tv/channel/' + encodeURIComponent(a.channel_id) + (qs.length ? '?' + qs.join('&') : '')).then(function (j) {
+      var list = (j.songs || []).filter(function (s) { return s.sources && s.sources.length; }), idx = 0;
+      for (var k = 0; k < list.length; k++) if (list[k].video_id === a.start_vid) idx = k;
+      opt.artist = j.name || '';
+      return playSongs(list, idx, opt);
+    });
+  } else { remoteAck(c.id, false, '沒有要播放的影片'); return false; }
+  p.catch(function (e) { remoteAck(c.id, false, '播放失敗：' + e.message); toast('手機送來的影片無法播放：' + e.message); });
+  return true;
+};
+// 播放器播完整份清單時 App 呼叫這個：有待播清單就接著播；沒有就告訴 App 可以回到頻道頁
+window.tvQueueNext = function () {
+  postJson('/api/remote/queue/take', { dec: DECODERS, q: getPref('quality') }).then(function (j) {
+    var songs = (j.songs || []).filter(function (s) { return s.sources && s.sources.length; });
+    if (songs.length) { toast('接著播待播清單（' + songs.length + ' 支）'); playSongs(songs, 0, { title: '待播清單' }); }
+    else if (NATIVE && NATIVE.queueEmpty) NATIVE.queueEmpty();
+  }).catch(function () { if (NATIVE && NATIVE.queueEmpty) NATIVE.queueEmpty(); });
+  return true;
+};
+// 右上角提示（新一集做好、同步到新影片）：顯示 6 秒
+window.tvNotify = function (text, image) {
+  $('noticeText').textContent = text || '';
+  var img = $('noticeImg');
+  if (image) { img.src = abs(image); img.style.display = 'block'; img.onerror = function () { img.style.display = 'none'; }; } else img.style.display = 'none';
+  $('notice').className = 'on';
+  clearTimeout(window.tvNotify._t); window.tvNotify._t = setTimeout(function () { $('notice').className = ''; }, 6000);
+  return true;
+};
+
+// ══ 螢幕保護：YTmate 開著、5 分鐘沒按鍵也沒在播放 → 全螢幕輪播最新節目封面、新影片標題和時間 ══
+var SV = { list: [], i: 0, t: null, layer: 0 };
+function saverList() {
+  var R = S.rows || {}, seen = {}, out = [];
+  [['shows', '🎙️ 最新節目'], ['recent', '🆕 最新同步'], ['cont', '▶ 繼續觀看']].forEach(function (p) {
+    (R[p[0]] || []).forEach(function (it) { if (it.thumb && !seen[it.video_id]) { seen[it.video_id] = 1; out.push({ img: it.thumb, title: it.title, label: p[1] + (it.channel_name ? '・' + it.channel_name : '') }); } });
+  });
+  if (!out.length) S.channels.forEach(function (c) { var a = c.cover || c.thumbs[0]; if (a) out.push({ img: a, title: c.name, label: '📺 頻道' }); });
+  return out.slice(0, 20);
+}
+function saverClock() {
+  var d = new Date(), wd = '日一二三四五六'.charAt(d.getDay());
+  $('svClock').textContent = two(d.getHours()) + ':' + two(d.getMinutes());
+  $('svDate').textContent = (d.getMonth() + 1) + ' 月 ' + d.getDate() + ' 日　星期' + wd;
+}
+function saverStep() {
+  saverClock();
+  if (!SV.list.length) return;
+  var it = SV.list[SV.i % SV.list.length]; SV.i++;
+  SV.layer = 1 - SV.layer;
+  var on = $('sv' + SV.layer), off = $('sv' + (1 - SV.layer));
+  on.style.backgroundImage = 'url("' + it.img + '")'; on.className = 'sv-img on'; off.className = 'sv-img';
+  $('svLabel').textContent = it.label; $('svTitle').textContent = it.title;
+}
+function showSaver() {
+  if (isOn('saver')) return;
+  SV.list = saverList(); SV.i = 0;
+  $('saver').className = 'fill on';
+  if (SAVER_ONLY) $('svHint').style.display = 'none';
+  saverStep(); clearInterval(SV.t); SV.t = setInterval(saverStep, 8000);
+}
+function hideSaver() { if (!isOn('saver')) return; $('saver').className = 'fill'; clearInterval(SV.t); S.lastKey = Date.now(); }
+setInterval(function () {
+  if (SAVER_ONLY || isOn('saver') || isOn('player') || !S.visible) return;
+  if (Date.now() - S.lastKey >= S.saverIdle) showSaver();
+}, 5000);
+
 // ══ 設定（含裝置資訊：回報問題時拍這頁就好）══
 function openSettings() {
   var info = {};
@@ -408,10 +757,21 @@ function openSettings() {
   $('model').textContent = info.model ? info.model + '（Android ' + info.android + '）' : navigator.platform;
   $('wv').textContent = CHROME ? 'Chrome ' + CHROME + (document.documentElement.className.indexOf('lite') >= 0 ? '（舊版，已開啟輕量模式）' : '') : navigator.userAgent.slice(0, 60);
   $('decs').textContent = DECODERS ? DECODERS.toUpperCase().split(',').join('、') : '（瀏覽器）';
+  $('remoteInfo').textContent = nativeHas('remoteAck') ? '可用：在手機打開 YTmate → 📺 遙控' : '需要更新電視 App（v1.1 以上）';
   prefLabels(); S.prefChanged = false;
   S.prevFocus = S.focusEl; $('settings').className = 'fill on'; setFocus($('settings').querySelector('.btn'), true);
 }
-function prefLabels() { $('qbtn').textContent = Q_LABEL[getPref('quality')] || Q_LABEL.auto; $('sbtn').textContent = S_LABEL[getPref('subs')] || S_LABEL.en; }
+function prefLabels() {
+  $('qbtn').textContent = Q_LABEL[getPref('quality')] || Q_LABEL.auto; $('sbtn').textContent = S_LABEL[getPref('subs')] || S_LABEL.en;
+  var hasCache = nativeHas('cacheInfo');
+  $('cbtn').style.display = hasCache ? '' : 'none'; $('ccbtn').style.display = hasCache ? '' : 'none';
+  $('cbtn').textContent = C_LABEL[getPref('cache')] || C_LABEL.auto;
+  var ci = {}; try { ci = JSON.parse(nativeCall('cacheInfo') || '{}'); } catch (e) {}
+  if (!hasCache) $('cacheInfo').textContent = '（需要更新電視 App）';
+  else if (getPref('cache') === 'off') $('cacheInfo').textContent = '關閉（只邊播邊緩衝）　電視剩餘 ' + fmtMB(ci.free);
+  else if (!ci.cap) $('cacheInfo').textContent = '自動：電視剩餘空間不到 1GB，目前不暫存（剩餘 ' + fmtMB(ci.free) + '）';
+  else $('cacheInfo').textContent = '自動（上限 ' + fmtMB(ci.cap) + '，已用 ' + fmtMB(ci.used) + '，電視剩餘 ' + fmtMB(ci.free) + '）';
+}
 function closeSettings() {
   $('settings').className = 'fill'; setFocus(S.prevFocus || $('gear'), true);
   // 改了畫質而且正在頻道頁 → 重新載入這個頻道（套用新的播放順序），焦點留在原本那一支
@@ -427,7 +787,10 @@ function unpair() {
     .catch(function () {}).then(function () { return fetch('/api/logout', { method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'same-origin' }); })
     .catch(function () {}).then(done);
 }
-loadHome();
+if (SAVER_ONLY) {
+  $('loading').style.display = 'none';
+  api('/api/tv/home').then(function (j) { S.channels = j.channels; S.rows = j.rows || {}; showSaver(); }).catch(function () { showSaver(); });
+} else loadHome();
 </script>
 </body>
 </html>

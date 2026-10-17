@@ -35,6 +35,9 @@ import java.net.URLEncoder
  * - 安全：WebView 只允許開本服務的網域，其他網址一律擋掉（JS 橋接不會暴露給別的網站）。
  * - 2026-10-15：選單鍵＝開／關設定；從播放器回來時焦點停在最後播放的那一支（window.tvAfterPlay）；
  *   登入過期（頁面收到 401）時先用裝置金鑰自動重新登入（YTmateTV.relogin()），失效了才回配對畫面。
+ * - 2026-10-17（v1.1）：📱 手機遙控（Remote：領指令、回報狀態）；播放暫存設定（MediaCache）；
+ *   告訴頁面「看得到／看不到」（window.tvVisible，播放器蓋在上面時頁面不啟動螢幕保護）；
+ *   播完整份清單時問頁面有沒有待播清單（window.tvQueueNext）。
  */
 class MainActivity : Activity() {
 
@@ -91,7 +94,34 @@ class MainActivity : Activity() {
         web.isFocusableInTouchMode = true
         web.requestFocus()
 
+        Remote.attachMain(this)
         if (savedInstanceState == null) start() else web.restoreState(savedInstanceState)
+    }
+
+    override fun onStart() {
+        super.onStart()
+        Remote.attachMain(this)
+        Remote.onStart(this)
+    }
+
+    override fun onStop() {
+        Remote.onStop()
+        super.onStop()
+    }
+
+    /** 給 Remote／播放器在頁面上執行 JS（主執行緒）。 */
+    fun runJs(js: String, cb: ((String?) -> Unit)?) {
+        if (isFinishing) { cb?.invoke(null); return }
+        web.evaluateJavascript(js) { r -> cb?.invoke(r) }
+    }
+
+    /** 播放器播完整份清單：請頁面看看有沒有待播清單（有的話頁面會直接開始播；沒有就回呼 queueEmpty）。 */
+    fun askQueueNext(): Boolean {
+        if (isFinishing) return false
+        web.evaluateJavascript("window.tvQueueNext ? (window.tvQueueNext(), 'ok') : 'old'") { r ->
+            if (r == null || !r.contains("ok")) PlayerActivity.onQueueEmpty()
+        }
+        return true
     }
 
     /** 有金鑰就自動登入，沒有就開配對畫面。 */
@@ -155,6 +185,7 @@ class MainActivity : Activity() {
     override fun onResume() {
         super.onResume()
         web.onResume()
+        web.evaluateJavascript("window.tvVisible && window.tvVisible(true)", null)
         hideSystemUi()
         web.requestFocus()                                    // 從播放器回來：遙控器按鍵一定送到頁面
         PlayerActivity.lastVideoId?.let { vid ->              // 焦點移到最後播放的那一支
@@ -164,6 +195,7 @@ class MainActivity : Activity() {
     }
 
     override fun onPause() {
+        web.evaluateJavascript("window.tvVisible && window.tvVisible(false)", null)
         web.onPause()
         CookieManager.getInstance().flush()
         super.onPause()
@@ -205,8 +237,25 @@ class MainActivity : Activity() {
         @JavascriptInterface
         fun play(json: String) {
             PlayerActivity.pending = json
-            runOnUiThread { startActivity(Intent(this@MainActivity, PlayerActivity::class.java)) }
+            // 播放器已經開著（手機送來新的影片、或接著播待播清單）→ 同一個播放器換清單（singleTop → onNewIntent）
+            runOnUiThread { startActivity(Intent(this@MainActivity, PlayerActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)) }
         }
+
+        /** 手機遙控的播放指令：頁面開始播放（或失敗）後回報結果。 */
+        @JavascriptInterface
+        fun remoteAck(id: String, ok: Boolean, msg: String) = Remote.ack(id, ok, msg)
+
+        /** 頁面查過了：沒有待播清單 → 播放器回到頻道頁。 */
+        @JavascriptInterface
+        fun queueEmpty() { runOnUiThread { PlayerActivity.onQueueEmpty() } }
+
+        /** 播放暫存的狀態：{mode, cap, used, free}（bytes）。 */
+        @JavascriptInterface
+        fun cacheInfo(): String = MediaCache.info(this@MainActivity).toString()
+
+        /** 清除播放暫存，回傳釋放了多少 bytes。 */
+        @JavascriptInterface
+        fun clearCache(): String = MediaCache.clear(this@MainActivity).toString()
 
         /** 頁面收到 401（登入過期）→ 用裝置金鑰重新登入。回傳 false＝沒有金鑰或 30 秒內已試過（頁面改去配對畫面）。 */
         @JavascriptInterface
@@ -310,7 +359,8 @@ object Prefs {
 
     // 使用者設定：只接受這幾個鍵與值（頁面不能拿這個存任意資料；取消配對也不會清掉）
     private val ALLOWED = mapOf("quality" to setOf("auto", "low"), "subs" to setOf("en", "zh", "off"),
-        "subs_last" to setOf("en", "zh"))          // 播放器按「下」關字幕前的語言（再打開時用）
+        "subs_last" to setOf("en", "zh"),          // 播放器按「下」關字幕前的語言（再打開時用）
+        "cache" to setOf("auto", "off"))           // 2026-10-17：播放暫存（auto＝依剩餘空間自動、off＝不暫存）
 
     fun get(ctx: Context, key: String): String {
         if (key !in ALLOWED) return ""

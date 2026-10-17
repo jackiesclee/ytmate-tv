@@ -34,6 +34,19 @@
             android:name=".PlayerActivity"
             android:configChanges="keyboard|keyboardHidden|navigation|orientation|screenSize|screenLayout|smallestScreenSize|uiMode|density"
             android:exported="false"
+            android:launchMode="singleTop"
             android:screenOrientation="landscape" />
+
+        <!-- 2026-10-17：系統螢幕保護程式（電視設定 → 螢幕保護程式 → 選「YTmate」；選不到也不影響） -->
+        <service
+            android:name=".SaverService"
+            android:exported="true"
+            android:label="YTmate"
+            android:permission="android.permission.BIND_DREAM_SERVICE">
+            <intent-filter>
+                <action android:name="android.service.dreams.DreamService" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </service>
     </application>
 </manifest>

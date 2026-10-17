@@ -1,10 +1,14 @@
 package net.iucat.ytmate.tv
 
 import android.app.Activity
+import android.app.ActivityManager
 import android.content.Context
+import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.Paint
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.net.Uri
@@ -34,12 +38,18 @@ import androidx.media3.common.TrackSelectionParameters
 import androidx.media3.common.Tracks
 import androidx.annotation.OptIn
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.datasource.DataSource
+import androidx.media3.datasource.DataSpec
 import androidx.media3.datasource.DefaultHttpDataSource
+import androidx.media3.datasource.cache.CacheDataSource
+import androidx.media3.datasource.cache.CacheWriter
+import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.datasource.DataSourceBitmapLoader
 import androidx.media3.session.MediaSession
 import com.google.common.util.concurrent.MoreExecutors
+import java.lang.ref.WeakReference
 import java.util.concurrent.Executors
 import androidx.media3.ui.PlayerView
 import org.json.JSONObject
@@ -53,7 +63,7 @@ import kotlin.concurrent.thread
  * 遙控器：
  *   確認鍵＝暫停／播放（控制列隱藏時）；左右＝倒轉／快轉 10 秒（按住不放會加速：30 秒、60 秒）；
  *   上＝顯示控制列（可選上一支／下一支、字幕）；下＝字幕開／關；媒體鍵／頻道上下＝上一支／下一支；
- *   返回＝先收起控制列，再按一次回到頻道頁。
+ *   選單鍵＝顯示控制列＋這支影片的中文摘要；返回＝先收起控制列，再按一次回到頻道頁。
  * 媒體檔需要登入：沿用 WebView 的 session cookie 送出請求。
  * 只有聲音的項目（音樂）顯示縮圖＋標題；每支開始播放時左上角顯示標題 4 秒。播完整個清單自動回到頻道頁。
  *
@@ -75,6 +85,18 @@ import kotlin.concurrent.thread
  *   - 控制列收起時按「下」＝字幕開／關（記住設定；再打開時回到上次的語言）。
  *   - 按左右快轉／倒轉時，畫面下方顯示時間軸（目前時間／總長度／這次跳了多少）；
  *     放開按鍵、恢復正常播放後時間軸自動消失。
+ *
+ * 2026-10-17（v1.1）：
+ *   - 📱 手機遙控：播放、暫停、快轉、上一支／下一支、停止、字幕、畫質、音量（Remote 轉交 remoteControl()）；
+ *     播放器開著時手機送來新的影片 → 同一個播放器換清單（onNewIntent），不用重開。
+ *   - 看到哪裡：所有影片都記（音樂除外），並存到伺服器（電視、網頁、其他電視共用；取比較新的那一份）。
+ *   - 快播完時右下角「5 秒後播放：下一支」：確認＝立刻播，返回＝取消（停在這支的結尾）。
+ *   - 整份清單播完 → 問頁面有沒有待播清單（手機排的），有就接著播。
+ *   - 章節：時間軸上顯示分段點，快轉時顯示目前章節名稱（伺服器提供 YouTube 章節）。
+ *   - 選單鍵叫出控制列時，右邊顯示這支影片的中文摘要。
+ *   - 右上角提示（新一集做好、同步到新影片）。
+ *   - 播放時加速下載：緩衝往前最多 5 分鐘；播放暫存（依電視剩餘空間自動，最多 500MB，見 MediaCache）；
+ *     目前這支緩衝夠了就在背景先下載下一支的開頭（約 3 分鐘），切換時秒開。
  */
 @OptIn(UnstableApi::class)
 class PlayerActivity : Activity() {
@@ -83,19 +105,27 @@ class PlayerActivity : Activity() {
         const val TAG = "YTmateTV"
         private const val HIDE_MS = 3500                 // 控制列幾毫秒沒操作就收起
         private const val WATCHDOG_IDLE_MS = 5000L       // 保險：播放中、這麼久沒按鍵，控制列還在就強制收起
-        // 長影片記住播放位置：只記超過這個長度的影片（自動測試的影片只有 40 秒，所以測試版門檻較低）
-        private val RESUME_MIN_MS = if (BuildConfig.E2E) 20_000L else 300_000L
+        // 看到哪裡：2026-10-17 跟使用者確認改成所有影片都記（音樂除外）；看了 10 秒以上、還沒到最後 20 秒才記
+        private const val RESUME_MIN_MS = 0L
         private const val NET_RETRIES = 3
+        // 「N 秒後播放下一支」：影片要夠長才顯示（自動測試的影片只有 40 秒，測試版門檻較低）
+        private val COUNTDOWN_MIN_DUR = if (BuildConfig.E2E) 20_000L else 60_000L
+        private const val COUNTDOWN_MS = 5_500L
+        private const val PREFETCH_SEC = 180L            // 預先下載下一支的前幾秒
         @Volatile
         var pending: String? = null      // MainActivity 傳來的播放清單 JSON（清單可能很長，不放 Intent）
         @Volatile
         var lastVideoId: String? = null  // 最後播放的影片（回到頻道頁時把焦點移到這一支）
+        private var current: WeakReference<PlayerActivity>? = null
+
+        /** 頁面查過了：沒有待播清單 → 回到頻道頁。 */
+        fun onQueueEmpty() { current?.get()?.queueDone() }
     }
 
     private data class Src(val url: String, val kind: String, val codec: String)
     private data class Sub(val url: String, val lang: String)
     private data class Item(val sources: List<Src>, val title: String, val artist: String, val thumb: String, val note: String,
-                            val subs: List<Sub>, val vid: String, val durMs: Long)
+                            val subs: List<Sub>, val vid: String, val durMs: Long, val resumeMs: Long, val resumeAtMs: Long)
 
     private lateinit var player: ExoPlayer
     private lateinit var view: PlayerView
@@ -109,8 +139,8 @@ class PlayerActivity : Activity() {
     private val ui = Handler(Looper.getMainLooper())
     private var cookie: String = ""
     private var errorsInRow = 0
-    private lateinit var srcIdx: IntArray            // 每支影片目前用第幾個版本
-    private lateinit var netRetry: IntArray          // 每支影片網路重連了幾次
+    private var srcIdx = IntArray(0)                 // 每支影片目前用第幾個版本
+    private var netRetry = IntArray(0)               // 每支影片網路重連了幾次
     private val noted = HashSet<Int>()
     private val resumed = HashSet<Int>()             // 這次已經套用過「從上次位置繼續」的影片
     private var lastKeyAt = 0L
@@ -122,6 +152,7 @@ class PlayerActivity : Activity() {
     private lateinit var seekBuffered: View
     private lateinit var seekPlayed: View
     private lateinit var seekThumb: View
+    private lateinit var seekTicks: TickView
     private lateinit var seekTime: TextView
     private lateinit var seekDur: TextView
     private lateinit var seekDeltaText: TextView
@@ -137,26 +168,61 @@ class PlayerActivity : Activity() {
     private var subPref = "en"                       // 字幕設定：en／zh／off（跟頁面的設定同一份）
     private var applyingSubPref = false
     private var lastSubLog = ""
+    // 2026-10-17
+    private lateinit var nextCard: LinearLayout
+    private lateinit var nextTitle: TextView
+    private lateinit var summaryBox: TextView
+    private lateinit var noticeBox: LinearLayout
+    private lateinit var noticeImg: ImageView
+    private lateinit var noticeText: TextView
+    private var countdownShown = false
+    private var cancelledIdx = -1
+    private var menuOpened = false
+    private var waitingQueue = false
+    private var queueAsked = false
+    private var lastResumeSync = 0L
+    private var playlistTitle = ""
+    private val chapters = HashMap<String, List<Pair<Long, String>>>()   // video_id → [(開始毫秒, 標題)]
+    private val summaries = HashMap<String, String>()
+    private val infoAsked = HashSet<String>()
+    private lateinit var http: DefaultHttpDataSource.Factory
+    private var cacheFactory: CacheDataSource.Factory? = null
+    private val prefetchExec = Executors.newSingleThreadExecutor()
+    @Volatile private var prefetchWriter: CacheWriter? = null
+    private var prefetchedIdx = -1
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val json = pending
         if (json == null) { finish(); return }
-
-        val root = JSONObject(json)
-        val arr = root.getJSONArray("items")
-        val start = root.optInt("start", 0)
+        current = WeakReference(this)
         cookie = CookieManager.getInstance().getCookie(BuildConfig.BASE_URL) ?: ""
 
-        val dataSource = DefaultHttpDataSource.Factory()
+        http = DefaultHttpDataSource.Factory()
             .setUserAgent("YTmateTV/${BuildConfig.VERSION_NAME}")
             .setAllowCrossProtocolRedirects(true)
             .setConnectTimeoutMs(15000)
             .setReadTimeoutMs(30000)
             .setDefaultRequestProperties(if (cookie.isNotEmpty()) mapOf("Cookie" to cookie) else emptyMap())
+        // 播放暫存（依剩餘空間自動決定；空間不夠時不暫存）
+        val cache = MediaCache.get(this)
+        val dataSource: DataSource.Factory = if (cache != null) {
+            CacheDataSource.Factory().setCache(cache).setUpstreamDataSourceFactory(http)
+                .setFlags(CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR).also { f -> cacheFactory = f }
+        } else http
+        // 緩衝：網路有餘力就往前多抓（最多 5 分鐘）；記憶體小的舊電視少抓一點
+        val am = getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+        val lowRam = am.isLowRamDevice || am.memoryClass < 192
+        val loadControl = DefaultLoadControl.Builder()
+            .setBufferDurationsMs(30_000, 300_000, 2_500, 5_000)
+            .setTargetBufferBytes(if (lowRam) 32 * 1024 * 1024 else 64 * 1024 * 1024)
+            .setPrioritizeTimeOverSizeThresholds(false)
+            .build()
+        Log.i(TAG, "player buffer lowRam=$lowRam cache=${cache != null} cap=${MediaCache.capBytes}")
 
         player = ExoPlayer.Builder(this)
             .setMediaSourceFactory(DefaultMediaSourceFactory(this).setDataSourceFactory(dataSource))
+            .setLoadControl(loadControl)
             .setSeekBackIncrementMs(10_000)
             .setSeekForwardIncrementMs(10_000)
             .setAudioAttributes(AudioAttributes.Builder().setUsage(C.USAGE_MEDIA).setContentType(C.AUDIO_CONTENT_TYPE_MOVIE).build(), true)
@@ -165,43 +231,13 @@ class PlayerActivity : Activity() {
         subPref = Prefs.get(this, "subs").ifEmpty { "en" }
         applySubPref()
 
-        for (i in 0 until arr.length()) {
-            val o = arr.getJSONObject(i)
-            val srcs = ArrayList<Src>()
-            val sa = o.optJSONArray("sources")
-            if (sa != null) for (k in 0 until sa.length()) {
-                val x = sa.getJSONObject(k)
-                if (x.optString("url").isNotEmpty()) srcs.add(Src(x.getString("url"), x.optString("kind"), x.optString("codec")))
-            }
-            if (srcs.isEmpty() && o.optString("url").isNotEmpty())        // 舊版頁面（只有單一網址）也能播
-                srcs.add(Src(o.getString("url"), if (o.optBoolean("audio")) "audio" else "original", ""))
-            if (srcs.isEmpty()) continue
-            val subs = ArrayList<Sub>()
-            val sl = o.optJSONArray("subs")
-            if (sl != null) for (k in 0 until sl.length()) {
-                val x = sl.getJSONObject(k)
-                if (x.optString("url").isNotEmpty()) subs.add(Sub(x.getString("url"), x.optString("lang")))
-            }
-            o.optJSONObject("sub")?.let { x ->                // 舊版頁面只給一個字幕
-                if (subs.isEmpty() && x.optString("url").isNotEmpty()) subs.add(Sub(x.getString("url"), x.optString("lang")))
-            }
-            items.add(Item(srcs, o.optString("title"), o.optString("artist"), o.optString("thumb"), o.optString("note"),
-                subs, o.optString("video_id"),
-                (o.optDouble("duration", 0.0) * 1000).toLong()))
-        }
-        if (items.isEmpty()) { finish(); return }
-        srcIdx = IntArray(items.size)
-        netRetry = IntArray(items.size)
-        val mediaItems = ArrayList<MediaItem>()
-        for (i in items.indices) mediaItems.add(buildItem(i))
-
         buildUi()
         view.player = player
         // 媒體工作階段：系統媒體鍵／藍牙遙控器／語音控制都送到這個播放器（Android TV 品質檢查表要求）
         try {
             // 縮圖也要登入：系統「正在播放」卡片的封面用同一個帶 cookie 的連線下載
             session = MediaSession.Builder(this, player).setId("ytmate-${SystemClock.uptimeMillis()}")
-                .setBitmapLoader(DataSourceBitmapLoader(MoreExecutors.listeningDecorator(Executors.newSingleThreadExecutor()), dataSource))
+                .setBitmapLoader(DataSourceBitmapLoader(MoreExecutors.listeningDecorator(Executors.newSingleThreadExecutor()), http))
                 .build()
         } catch (e: Exception) {
             Log.w(TAG, "media session failed: $e")
@@ -210,26 +246,34 @@ class PlayerActivity : Activity() {
             override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
                 errorsInRow = 0
                 val i = player.currentMediaItemIndex
-                // 上一支：自然播完 → 清掉記錄的位置；中途換掉 → 記住看到哪裡
+                // 上一支：自然播完 → 標成看過；中途換掉 → 記住看到哪裡
                 if (curIdx in items.indices && curIdx != i) {
-                    if (reason == Player.MEDIA_ITEM_TRANSITION_REASON_AUTO) Resume.clear(this@PlayerActivity, items[curIdx].vid)
-                    else Resume.save(this@PlayerActivity, items[curIdx].vid, curPos, curDur, RESUME_MIN_MS)
+                    if (reason == Player.MEDIA_ITEM_TRANSITION_REASON_AUTO) rememberPos(curIdx, curDur, curDur, true)
+                    else rememberPos(curIdx, curPos, curDur, false)
                 }
                 Log.i(TAG, "transition item=$i reason=$reason")
+                hideCountdown()
+                if (player.pauseAtEndOfMediaItems) player.pauseAtEndOfMediaItems = false
+                cancelledIdx = -1
                 if (i in items.indices) {
                     netRetry[i] = 0
                     if (curIdx != i && (reason == Player.MEDIA_ITEM_TRANSITION_REASON_AUTO || reason == Player.MEDIA_ITEM_TRANSITION_REASON_SEEK))
                         applyResume(i)
                     curIdx = i; curPos = 0L; curDur = 0L
                     lastVideoId = items[i].vid
+                    requestInfo(i)
+                    applyChapters(i)
+                    if (prefetchedIdx != i) cancelPrefetch()
+                    prefetchedIdx = -1
                 }
                 showItem(i)
+                Remote.reportNow()
             }
 
             // 影像軌這台電視解不了（例如舊電視遇到 AV1）→ 換下一個版本
             override fun onTracksChanged(tracks: Tracks) {
                 val i = player.currentMediaItemIndex
-                val cur = items.getOrNull(i)?.sources?.getOrNull(srcIdx[i]) ?: return
+                val cur = items.getOrNull(i)?.sources?.getOrNull(srcIdx.getOrElse(i) { 0 }) ?: return
                 logSubtitle(tracks)
                 if (cur.kind == "audio") return
                 var hasVideo = false
@@ -283,19 +327,16 @@ class PlayerActivity : Activity() {
                     view.controllerShowTimeoutMs = HIDE_MS
                     view.showController()                    // 播放中 → 重新排定 3.5 秒後收起
                 }
+                Remote.reportNow()
             }
 
             override fun onPlaybackStateChanged(state: Int) {
                 updateKeepScreenOn()
                 if (state == Player.STATE_READY) {
                     val i = player.currentMediaItemIndex
-                    if (i in items.indices) netRetry[i] = 0
+                    if (i in netRetry.indices) netRetry[i] = 0
                 }
-                if (state == Player.STATE_ENDED) {             // 整個清單播完 → 回到頻道頁
-                    if (curIdx in items.indices) Resume.clear(this@PlayerActivity, items[curIdx].vid)
-                    curIdx = -1
-                    finish()
-                }
+                if (state == Player.STATE_ENDED) onPlaylistEnded()
             }
 
             override fun onPlayerError(error: PlaybackException) {
@@ -327,17 +368,84 @@ class PlayerActivity : Activity() {
                 player.play()
             }
         })
+        if (!loadPlaylist(json, false)) { finish(); return }
+        ui.postDelayed(watchdog, 1000)
+    }
+
+    /** 播放器已經開著時又收到新的清單（手機送來的影片、待播清單）→ 同一個播放器換清單。 */
+    override fun onNewIntent(intent: Intent?) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        val json = pending ?: return
+        Log.i(TAG, "playlist replace (new intent)")
+        saveCurrent()
+        cancelPrefetch()
+        ui.removeCallbacks(queueTimeout)
+        waitingQueue = false
+        queueAsked = false
+        if (!loadPlaylist(json, true)) Toast.makeText(this, "收到的清單沒有可以播放的影片", Toast.LENGTH_LONG).show()
+    }
+
+    /** 解析頁面送來的清單（items、start、startPos），開始播放。回傳是否有可以播的影片。 */
+    private fun loadPlaylist(json: String, replace: Boolean): Boolean {
+        val root = try { JSONObject(json) } catch (e: Exception) { return false }
+        val arr = root.optJSONArray("items") ?: return false
+        val start = root.optInt("start", 0)
+        val startPosOverride = root.optLong("startPos", 0L)
+        val parsed = ArrayList<Item>()
+        for (i in 0 until arr.length()) {
+            val o = arr.getJSONObject(i)
+            val srcs = ArrayList<Src>()
+            val sa = o.optJSONArray("sources")
+            if (sa != null) for (k in 0 until sa.length()) {
+                val x = sa.getJSONObject(k)
+                if (x.optString("url").isNotEmpty()) srcs.add(Src(x.getString("url"), x.optString("kind"), x.optString("codec")))
+            }
+            if (srcs.isEmpty() && o.optString("url").isNotEmpty())        // 舊版頁面（只有單一網址）也能播
+                srcs.add(Src(o.getString("url"), if (o.optBoolean("audio")) "audio" else "original", ""))
+            if (srcs.isEmpty()) continue
+            val subs = ArrayList<Sub>()
+            val sl = o.optJSONArray("subs")
+            if (sl != null) for (k in 0 until sl.length()) {
+                val x = sl.getJSONObject(k)
+                if (x.optString("url").isNotEmpty()) subs.add(Sub(x.getString("url"), x.optString("lang")))
+            }
+            o.optJSONObject("sub")?.let { x ->                // 舊版頁面只給一個字幕
+                if (subs.isEmpty() && x.optString("url").isNotEmpty()) subs.add(Sub(x.getString("url"), x.optString("lang")))
+            }
+            parsed.add(Item(srcs, o.optString("title"), o.optString("artist"), o.optString("thumb"), o.optString("note"),
+                subs, o.optString("video_id"), (o.optDouble("duration", 0.0) * 1000).toLong(),
+                (o.optDouble("resume", 0.0) * 1000).toLong(), (o.optDouble("resumeAt", 0.0) * 1000).toLong()))
+        }
+        if (parsed.isEmpty()) return false
+        items.clear(); items.addAll(parsed)
+        srcIdx = IntArray(items.size)
+        netRetry = IntArray(items.size)
+        noted.clear(); resumed.clear()
+        cancelledIdx = -1; prefetchedIdx = -1; curIdx = -1
+        hideCountdown()
+        playlistTitle = root.optString("title")
+        val mediaItems = ArrayList<MediaItem>()
+        for (i in items.indices) mediaItems.add(buildItem(i))
         val s0 = start.coerceIn(0, mediaItems.size - 1)
-        val startPos = Resume.get(this, items[s0].vid)
+        val startPos = if (startPosOverride > 0) startPosOverride else resumePos(s0)
+        player.pauseAtEndOfMediaItems = false
         player.setMediaItems(mediaItems, s0, startPos)
         player.prepare()
         player.playWhenReady = true
         curIdx = s0
         lastVideoId = items[s0].vid
         resumed.add(s0)
-        if (startPos > 0) resumeToast(startPos)
+        Log.i(TAG, "playlist loaded items=${items.size} start=$s0 startPos=$startPos replace=$replace title=$playlistTitle")
+        if (startPosOverride > 0) {
+            Log.i(TAG, "start pos=$startPosOverride")
+            Toast.makeText(this, "從 ${fmt(startPosOverride / 1000)} 接著播", Toast.LENGTH_SHORT).show()
+        } else if (startPos > 0) resumeToast(startPos)
+        requestInfo(s0)
+        applyChapters(s0)
         showItem(s0)
-        ui.postDelayed(watchdog, 1000)
+        Remote.reportNow()
+        return true
     }
 
     private fun langGroup(lang: String?): String = if ((lang ?: "").lowercase().startsWith("zh")) "zh" else "en"
@@ -377,10 +485,20 @@ class PlayerActivity : Activity() {
             code == PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT ||
             code == PlaybackException.ERROR_CODE_IO_UNSPECIFIED
 
-    /** 換到一支「之前看到一半」的長影片 → 從那裡繼續。 */
+    /** 這支要從哪裡開始：伺服器記的（電視、網頁、其他電視共用）跟 App 自己記的比，取比較新的。音樂一律從頭。 */
+    private fun resumePos(i: Int): Long {
+        val it = items.getOrNull(i) ?: return 0L
+        if (it.sources.getOrNull(srcIdx.getOrElse(i) { 0 })?.kind == "audio") return 0L
+        val (localPos, localAt) = Resume.entry(this, it.vid)
+        val pos = if (it.resumeAtMs > 0 && it.resumeAtMs >= localAt) it.resumeMs else localPos
+        Log.i(TAG, "resume pick vid=${it.vid} server=${it.resumeMs}@${it.resumeAtMs} local=$localPos@$localAt -> $pos")
+        return pos.coerceAtLeast(0L)
+    }
+
+    /** 換到一支「之前看到一半」的影片 → 從那裡繼續。 */
     private fun applyResume(i: Int) {
         if (!resumed.add(i)) return
-        val pos = Resume.get(this, items[i].vid)
+        val pos = resumePos(i)
         if (pos > 0) {
             player.seekTo(i, pos)
             resumeToast(pos)
@@ -392,6 +510,19 @@ class PlayerActivity : Activity() {
         Toast.makeText(this, "從上次看到的 ${fmt(pos / 1000)} 繼續播放（按左鍵倒轉）", Toast.LENGTH_LONG).show()
     }
 
+    /** 記住看到哪裡（App 自己＋伺服器）。finished＝看完了（標成看過）。音樂不記。 */
+    private fun rememberPos(i: Int, pos: Long, dur: Long, finished: Boolean) {
+        val it = items.getOrNull(i) ?: return
+        if (isAudio(i)) return
+        if (finished) {
+            Resume.clear(this, it.vid)
+            Remote.saveResume(it.vid, dur, dur, true)
+        } else {
+            Resume.save(this, it.vid, pos, dur, RESUME_MIN_MS)
+            if (pos >= 10_000L) Remote.saveResume(it.vid, pos, dur, false)
+        }
+    }
+
     private fun updateKeepScreenOn() {
         if (!::view.isInitialized) return
         val st = player.playbackState
@@ -400,7 +531,7 @@ class PlayerActivity : Activity() {
 
     /**
      * 保險：每秒檢查一次。播放中、控制列還開著、5 秒沒按鍵、而且沒有開著字幕選單（選單會搶走視窗焦點）→ 收起控制列。
-     * 同時記下目前播放位置（換支或離開時記住長影片看到哪裡）。
+     * 同時記下目前播放位置（換支或離開時記住看到哪裡；每 30 秒也存一次到伺服器）、更新「N 秒後播放下一支」、預先下載下一支。
      */
     private val watchdog = object : Runnable {
         override fun run() {
@@ -417,6 +548,12 @@ class PlayerActivity : Activity() {
                 Log.i(TAG, "controller watchdog hide")
                 view.hideController()
             }
+            if (player.isPlaying && curIdx in items.indices && now - lastResumeSync > 30_000L && curPos >= 10_000L) {
+                lastResumeSync = now
+                rememberPos(curIdx, curPos, curDur, false)
+            }
+            updateCountdown()
+            maybePrefetch()
             ui.postDelayed(this, 1000)
         }
     }
@@ -468,7 +605,29 @@ class PlayerActivity : Activity() {
         showItem(i)
     }
 
+    /** 手機切換畫質：這支影片有對應的版本就馬上換（同一個時間點繼續），沒有就下一支開始套用。 */
+    private fun switchQuality(v: String): Pair<Boolean, String> {
+        if (v != "low" && v != "auto") return false to "畫質設定不對"
+        Prefs.set(this, "quality", v)
+        val i = player.currentMediaItemIndex
+        val it = items.getOrNull(i) ?: return true to "已切換畫質設定"
+        val want = if (v == "low") "low" else "original"
+        val k = it.sources.indexOfFirst { s -> s.kind == want }
+        if (k < 0) return true to (if (v == "low") "畫質：480p（這支還沒有 480p 版本，下次播放套用）" else "畫質：自動（下次播放套用）")
+        if (k == srcIdx[i]) return true to (if (v == "low") "畫質：480p" else "畫質：自動（最佳）")
+        val pos = player.currentPosition.coerceAtLeast(0L)
+        srcIdx[i] = k
+        player.replaceMediaItem(i, buildItem(i))
+        player.seekTo(i, pos)
+        player.prepare()
+        player.play()
+        Log.i(TAG, "quality switch item=$i -> $want")
+        return true to (if (v == "low") "畫質：已切換成 480p" else "畫質：已切換成原檔（最佳）")
+    }
+
     private fun dp(v: Float): Int = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, v, resources.displayMetrics).toInt()
+
+    private fun roundBg(color: String, radius: Float) = GradientDrawable().apply { cornerRadius = dp(radius).toFloat(); setColor(Color.parseColor(color)) }
 
     private fun buildUi() {
         val root = FrameLayout(this)
@@ -500,7 +659,7 @@ class PlayerActivity : Activity() {
         art = ImageView(this).apply {
             scaleType = ImageView.ScaleType.CENTER_CROP; visibility = View.GONE
             clipToOutline = true
-            background = GradientDrawable().apply { cornerRadius = dp(18f).toFloat(); setColor(Color.parseColor("#171724")) }
+            background = roundBg("#171724", 18f)
         }
         overlay.addView(art, FrameLayout.LayoutParams(dp(448f), dp(252f), Gravity.CENTER))
 
@@ -526,15 +685,15 @@ class PlayerActivity : Activity() {
             setTextColor(Color.WHITE); textSize = 20f; typeface = Typeface.DEFAULT_BOLD; gravity = Gravity.CENTER
         }
         seekBox.addView(seekDeltaText, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(10f) })
-        seekTrack = FrameLayout(this).apply {
-            background = GradientDrawable().apply { cornerRadius = dp(3f).toFloat(); setColor(Color.parseColor("#55FFFFFF")) }
-        }
-        seekBuffered = View(this).apply { background = GradientDrawable().apply { cornerRadius = dp(3f).toFloat(); setColor(Color.parseColor("#88FFFFFF")) } }
-        seekPlayed = View(this).apply { background = GradientDrawable().apply { cornerRadius = dp(3f).toFloat(); setColor(Color.parseColor("#EC4899")) } }
+        seekTrack = FrameLayout(this).apply { background = roundBg("#55FFFFFF", 3f) }
+        seekBuffered = View(this).apply { background = roundBg("#88FFFFFF", 3f) }
+        seekPlayed = View(this).apply { background = roundBg("#EC4899", 3f) }
         seekTrack.addView(seekBuffered, FrameLayout.LayoutParams(0, -1))
         seekTrack.addView(seekPlayed, FrameLayout.LayoutParams(0, -1))
         val trackWrap = FrameLayout(this)
         trackWrap.addView(seekTrack, FrameLayout.LayoutParams(-1, dp(6f), Gravity.CENTER_VERTICAL))
+        seekTicks = TickView(this)                                   // 章節分段點
+        trackWrap.addView(seekTicks, FrameLayout.LayoutParams(-1, dp(14f), Gravity.CENTER_VERTICAL))
         seekThumb = View(this).apply { background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(Color.WHITE) } }
         trackWrap.addView(seekThumb, FrameLayout.LayoutParams(dp(16f), dp(16f), Gravity.CENTER_VERTICAL))
         seekBox.addView(trackWrap, LinearLayout.LayoutParams(-1, dp(18f)))
@@ -550,10 +709,44 @@ class PlayerActivity : Activity() {
         osd = TextView(this).apply {
             setTextColor(Color.WHITE); textSize = 18f; typeface = Typeface.DEFAULT_BOLD
             setPadding(dp(22f), dp(10f), dp(22f), dp(10f))
-            background = GradientDrawable().apply { cornerRadius = dp(24f).toFloat(); setColor(Color.parseColor("#CC17172A")) }
+            background = roundBg("#CC17172A", 24f)
             visibility = View.GONE
         }
         overlay.addView(osd, FrameLayout.LayoutParams(-2, -2, Gravity.TOP or Gravity.CENTER_HORIZONTAL).apply { topMargin = dp(36f) })
+
+        // 右下角「N 秒後播放：下一支」
+        nextCard = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(20f), dp(14f), dp(20f), dp(14f))
+            background = roundBg("#E617172A", 14f)
+            visibility = View.GONE
+        }
+        nextTitle = TextView(this).apply { setTextColor(Color.WHITE); textSize = 17f; typeface = Typeface.DEFAULT_BOLD; maxLines = 2 }
+        val nextHint = TextView(this).apply { setTextColor(Color.parseColor("#C8C8D8")); textSize = 13f; text = "確認＝立即播放　返回＝取消" }
+        nextCard.addView(nextTitle); nextCard.addView(nextHint, LinearLayout.LayoutParams(-2, -2).apply { topMargin = dp(4f) })
+        overlay.addView(nextCard, FrameLayout.LayoutParams(dp(380f), -2, Gravity.BOTTOM or Gravity.END).apply { rightMargin = dp(40f); bottomMargin = dp(110f) })
+
+        // 選單鍵叫出控制列時，右邊顯示這支影片的中文摘要
+        summaryBox = TextView(this).apply {
+            setTextColor(Color.WHITE); textSize = 15f; setLineSpacing(0f, 1.35f)
+            setPadding(dp(20f), dp(16f), dp(20f), dp(16f))
+            background = roundBg("#E617172A", 14f)
+            visibility = View.GONE
+        }
+        overlay.addView(summaryBox, FrameLayout.LayoutParams(dp(400f), -2, Gravity.TOP or Gravity.END).apply { rightMargin = dp(40f); topMargin = dp(120f) })
+
+        // 右上角提示（新一集做好、同步到新影片；手機送來的提示）
+        noticeBox = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(14f), dp(14f), dp(14f), dp(14f))
+            background = roundBg("#F217172A", 14f)
+            visibility = View.GONE
+        }
+        noticeImg = ImageView(this).apply { scaleType = ImageView.ScaleType.CENTER_CROP; visibility = View.GONE; clipToOutline = true; background = roundBg("#000000", 8f) }
+        noticeText = TextView(this).apply { setTextColor(Color.WHITE); textSize = 16f; typeface = Typeface.DEFAULT_BOLD; maxLines = 3 }
+        noticeBox.addView(noticeImg, LinearLayout.LayoutParams(-1, dp(171f)).apply { bottomMargin = dp(10f) })
+        noticeBox.addView(noticeText)
+        overlay.addView(noticeBox, FrameLayout.LayoutParams(dp(330f), -2, Gravity.TOP or Gravity.END).apply { rightMargin = dp(32f); topMargin = dp(28f) })
         setContentView(root)
     }
 
@@ -566,13 +759,26 @@ class PlayerActivity : Activity() {
         ui.postDelayed(hideOsd, 2000)
     }
 
+    private val hideNotice = Runnable { noticeBox.visibility = View.GONE }
+
+    /** 右上角提示 6 秒（Remote 收到 toast 指令時呼叫）。 */
+    fun showNotice(text: String, imageUrl: String) {
+        noticeText.text = text
+        noticeImg.visibility = View.GONE
+        noticeImg.setImageDrawable(null)
+        if (imageUrl.isNotEmpty()) loadImage(imageUrl) { bmp -> noticeImg.setImageBitmap(bmp); noticeImg.visibility = View.VISIBLE }
+        noticeBox.visibility = View.VISIBLE
+        ui.removeCallbacks(hideNotice)
+        ui.postDelayed(hideNotice, 6000)
+    }
+
     /** 控制列收起時按「下」：字幕開／關（記住設定；再打開時用上次的語言）。 */
-    private fun toggleSubtitles() {
+    private fun toggleSubtitles(): String {
         val i = player.currentMediaItemIndex
-        val it = items.getOrNull(i) ?: return
+        val it = items.getOrNull(i) ?: return "沒有在播放"
         if (it.subs.isEmpty() || isAudio(i)) {
             Log.i(TAG, "subtitle toggle: none available")
-            showOsd("這支影片沒有字幕"); return
+            showOsd("這支影片沒有字幕"); return "這支影片沒有字幕"
         }
         if (subPref == "off") {
             subPref = Prefs.get(this, "subs_last").ifEmpty { "en" }
@@ -583,7 +789,9 @@ class PlayerActivity : Activity() {
         Prefs.set(this, "subs", subPref)
         applySubPref()
         Log.i(TAG, "subtitle toggle -> $subPref saved=${Prefs.get(this, "subs")}")
-        showOsd(when (subPref) { "off" -> "字幕：關閉"; "zh" -> "字幕：中文"; else -> "字幕：English" })
+        val label = when (subPref) { "off" -> "字幕：關閉"; "zh" -> "字幕：中文"; else -> "字幕：English" }
+        showOsd(label)
+        return label
     }
 
     /** 快轉／倒轉時顯示時間軸；放開按鍵、恢復正常播放後自動消失。 */
@@ -598,7 +806,9 @@ class PlayerActivity : Activity() {
         seekTarget = target
         seekReleasedAt = 0L
         val sign = if (seekAccum >= 0) "+" else "−"
-        seekDeltaText.text = (if (seekAccum >= 0) "⏩ " else "⏪ ") + sign + fmt(kotlin.math.abs(seekAccum) / 1000)
+        val chap = chapterAt(player.currentMediaItemIndex, target)
+        seekDeltaText.text = (if (seekAccum >= 0) "⏩ " else "⏪ ") + sign + fmt(kotlin.math.abs(seekAccum) / 1000) + (if (chap.isNotEmpty()) "　·　$chap" else "")
+        if (chap.isNotEmpty()) Log.i(TAG, "seek chapter=$chap")
         updateSeekBar(target)
         ui.removeCallbacks(seekTick)
         ui.postDelayed(seekTick, 250)
@@ -610,6 +820,7 @@ class PlayerActivity : Activity() {
         seekDur.text = if (dur > 0) fmt(dur / 1000) else "--:--"
         val w = seekTrack.width
         if (w <= 0 || dur <= 0) { seekTrack.post { if (seekShown) updateSeekBar(posMs) }; return }
+        seekTicks.setDuration(dur)
         val played = (w * (posMs.toDouble() / dur)).toInt().coerceIn(0, w)
         val buffered = (w * (player.bufferedPosition.toDouble() / dur)).toInt().coerceIn(played, w)
         seekPlayed.layoutParams = (seekPlayed.layoutParams as FrameLayout.LayoutParams).apply { width = played }
@@ -640,11 +851,18 @@ class PlayerActivity : Activity() {
         }
     }
 
+    /** 手機遙控的快轉／跳到：顯示時間軸，跟按住放開一樣自動消失。 */
+    private fun remoteSeekRelease() {
+        if (!seekShown) return
+        seekReleasedAt = SystemClock.uptimeMillis()
+        ui.removeCallbacks(seekTick); ui.postDelayed(seekTick, 250)
+    }
+
     private val hideTitle = Runnable { titleBox.animate().alpha(0f).setDuration(400).start() }
 
     private fun isAudio(i: Int): Boolean = items.getOrNull(i)?.let { it.sources[srcIdx[i]].kind == "audio" } ?: false
 
-    /** 控制列出現 → 標題一起出現（看得到在播哪一支）；控制列收起 → 影片的標題也收起。 */
+    /** 控制列出現 → 標題一起出現（看得到在播哪一支）；控制列收起 → 影片的標題也收起。選單鍵叫出的 → 右邊加摘要。 */
     private fun onControllerVisibility(visible: Boolean) {
         if (!::titleBox.isInitialized || !::player.isInitialized) return
         val i = player.currentMediaItemIndex
@@ -655,9 +873,24 @@ class PlayerActivity : Activity() {
             titleText.text = it.title
             subText.text = listOf(it.artist, "${i + 1} / ${items.size}").filter { s -> s.isNotEmpty() }.joinToString("  ·  ")
             titleBox.animate().cancel(); titleBox.alpha = 1f
-        } else if (!isAudio(i)) {
-            ui.postDelayed(hideTitle, 300)
+            if (menuOpened) showSummary(i)
+        } else {
+            summaryBox.visibility = View.GONE
+            menuOpened = false
+            if (!isAudio(i)) ui.postDelayed(hideTitle, 300)
         }
+    }
+
+    private fun showSummary(i: Int) {
+        val it = items.getOrNull(i) ?: return
+        val s = summaries[it.vid]
+        summaryBox.text = "📝 這支在講什麼\n\n" + when {
+            s == null -> "（摘要載入中…）"
+            s.isEmpty() -> "（這支影片還沒有摘要）"
+            else -> s
+        }
+        summaryBox.visibility = View.VISIBLE
+        Log.i(TAG, "summary shown len=${s?.length ?: -1}")
     }
 
     private fun showItem(i: Int) {
@@ -678,6 +911,146 @@ class PlayerActivity : Activity() {
         }
     }
 
+    // ══ 章節、摘要（伺服器 /api/tv/info）══
+    private fun requestInfo(i: Int) {
+        val vid = items.getOrNull(i)?.vid ?: return
+        if (vid.isEmpty() || !infoAsked.add(vid)) return
+        Remote.fetchInfo(vid) { j ->
+            val list = ArrayList<Pair<Long, String>>()
+            val arr = j.optJSONArray("chapters")
+            if (arr != null) for (k in 0 until arr.length()) {
+                val c = arr.getJSONObject(k)
+                list.add(((c.optDouble("start", 0.0)) * 1000).toLong() to c.optString("title"))
+            }
+            chapters[vid] = list
+            summaries[vid] = j.optString("summary")
+            Log.i(TAG, "info vid=$vid chapters=${list.size} summary=${summaries[vid]?.length}")
+            val cur = player.currentMediaItemIndex
+            if (items.getOrNull(cur)?.vid == vid) {
+                applyChapters(cur)
+                if (summaryBox.visibility == View.VISIBLE) showSummary(cur)
+            }
+        }
+    }
+
+    private fun applyChapters(i: Int) {
+        val vid = items.getOrNull(i)?.vid ?: return
+        val starts = (chapters[vid] ?: emptyList()).map { p -> p.first }.filter { t -> t > 0 }.toLongArray()
+        try { view.setExtraAdGroupMarkers(starts, BooleanArray(starts.size)) } catch (_: Exception) {}
+        seekTicks.setMarks(starts)
+        if (starts.isNotEmpty()) Log.i(TAG, "chapters item=$i n=${starts.size + 1}")
+    }
+
+    private fun chapterAt(i: Int, posMs: Long): String {
+        val list = chapters[items.getOrNull(i)?.vid ?: return ""] ?: return ""
+        var t = ""
+        for ((st, title) in list) if (st <= posMs) t = title
+        return t
+    }
+
+    // ══「N 秒後播放：下一支」══
+    private fun updateCountdown() {
+        val i = player.currentMediaItemIndex
+        val dur = player.duration
+        val remain = if (dur > 0) dur - player.currentPosition else -1L
+        val show = player.isPlaying && i in items.indices && !isAudio(i) && player.hasNextMediaItem() && cancelledIdx != i &&
+            dur >= COUNTDOWN_MIN_DUR && remain in 1..COUNTDOWN_MS
+        if (!show) { if (countdownShown && !(player.playWhenReady && remain in 0..COUNTDOWN_MS)) hideCountdown(); return }
+        val next = items.getOrNull(i + 1) ?: return
+        val secs = ((remain + 999) / 1000).coerceAtLeast(1)
+        nextTitle.text = "$secs 秒後播放：${next.title}"
+        if (!countdownShown) {
+            countdownShown = true
+            nextCard.visibility = View.VISIBLE
+            Log.i(TAG, "countdown show item=$i next=${i + 1}")
+        }
+    }
+
+    private fun hideCountdown() {
+        if (!::nextCard.isInitialized) return
+        if (countdownShown) Log.i(TAG, "countdown hide")
+        countdownShown = false
+        nextCard.visibility = View.GONE
+    }
+
+    private fun cancelCountdown() {
+        val i = player.currentMediaItemIndex
+        cancelledIdx = i
+        player.pauseAtEndOfMediaItems = true          // 停在這支的結尾（不自動跳下一支）
+        hideCountdown()
+        showOsd("已取消自動播放下一支")
+        Log.i(TAG, "countdown cancel item=$i")
+    }
+
+    // ══ 整份清單播完：有待播清單就接著播 ══
+    private fun onPlaylistEnded() {
+        if (curIdx in items.indices) rememberPos(curIdx, curDur, curDur, true)
+        curIdx = -1
+        val m = Remote.mainActivity
+        if (!queueAsked && m != null && m.askQueueNext()) {
+            queueAsked = true
+            waitingQueue = true
+            Log.i(TAG, "playlist ended -> ask queue")
+            ui.removeCallbacks(queueTimeout)
+            ui.postDelayed(queueTimeout, 8000)
+        } else finish()
+    }
+
+    private val queueTimeout = Runnable { if (waitingQueue) { Log.i(TAG, "queue timeout"); finish() } }
+
+    fun queueDone() {
+        if (!waitingQueue) return
+        waitingQueue = false
+        ui.removeCallbacks(queueTimeout)
+        Log.i(TAG, "queue empty -> finish")
+        finish()
+    }
+
+    // ══ 預先下載下一支的開頭（有播放暫存時）══
+    private fun maybePrefetch() {
+        val f = cacheFactory ?: return
+        val i = player.currentMediaItemIndex
+        val n = i + 1
+        if (!player.isPlaying || n !in items.indices || prefetchedIdx == n) return
+        if (SystemClock.uptimeMillis() - playingSince < 8000) return
+        val dur = player.duration
+        val ahead = player.bufferedPosition - player.currentPosition
+        if (!(ahead > 60_000L || (dur > 0 && player.bufferedPosition >= dur - 1000))) return
+        prefetchedIdx = n
+        val it = items[n]
+        val src = it.sources[srcIdx[n]]
+        val durMs = it.durMs
+        val cap = MediaCache.capBytes
+        prefetchExec.execute {
+            try {
+                val size = headSize(src.url)
+                var len = if (size > 0) {
+                    if (durMs > 0) minOf(size, maxOf(8L shl 20, size * (PREFETCH_SEC * 1000) / durMs + (2L shl 20))) else minOf(size, 30L shl 20)
+                } else 30L shl 20
+                if (cap > 0) len = minOf(len, cap / 3)
+                Log.i(TAG, "prefetch item=$n kind=${src.kind} bytes=$len size=$size")
+                val w = CacheWriter(f.createDataSource(), DataSpec.Builder().setUri(Uri.parse(src.url)).setPosition(0).setLength(len).build(), null, null)
+                prefetchWriter = w
+                w.cache()
+                Log.i(TAG, "prefetch item=$n done")
+            } catch (e: Exception) {
+                Log.i(TAG, "prefetch item=$n stopped: $e")
+            } finally {
+                prefetchWriter = null
+            }
+        }
+    }
+
+    private fun cancelPrefetch() { try { prefetchWriter?.cancel() } catch (_: Exception) {} }
+
+    private fun headSize(url: String): Long = try {
+        val c = URL(url).openConnection() as HttpURLConnection
+        c.requestMethod = "HEAD"; c.connectTimeout = 10000; c.readTimeout = 15000
+        if (cookie.isNotEmpty()) c.setRequestProperty("Cookie", cookie)
+        val n = if (c.responseCode == 200) c.contentLength.toLong() else -1L
+        c.disconnect(); n
+    } catch (_: Exception) { -1L }
+
     /** 縮圖也需要登入：帶 cookie 下載，背景執行緒解碼後回主執行緒顯示。 */
     private fun loadImage(url: String, done: (Bitmap) -> Unit) {
         thread(isDaemon = true) {
@@ -692,6 +1065,63 @@ class PlayerActivity : Activity() {
         }
     }
 
+    // ══ 📱 手機遙控 ══
+    /** Remote 回報給手機的播放狀態。 */
+    fun remoteState(): JSONObject {
+        val i = player.currentMediaItemIndex
+        val it = items.getOrNull(i)
+        val o = JSONObject().put("screen", "player").put("playing", player.isPlaying).put("paused", !player.playWhenReady)
+        if (it != null) {
+            val dur = player.duration.takeIf { d -> d > 0 } ?: it.durMs
+            o.put("video_id", it.vid).put("title", it.title).put("channel", it.artist).put("thumb", it.thumb)
+                .put("pos", player.currentPosition.coerceAtLeast(0L) / 1000.0).put("dur", dur / 1000.0)
+                .put("index", i).put("count", items.size)
+                .put("buffered", (player.bufferedPosition - player.currentPosition).coerceAtLeast(0L) / 1000.0)
+        }
+        return o
+    }
+
+    /** 執行手機送來的操作，回傳（成功？、給手機看的訊息）。 */
+    fun remoteControl(action: String, value: Any?): Pair<Boolean, String> {
+        lastKeyAt = SystemClock.uptimeMillis()
+        val num = (value as? Number)?.toDouble()
+        val r: Pair<Boolean, String> = when (action) {
+            "toggle" -> { togglePlay(); true to (if (player.playWhenReady) "▶ 播放" else "⏸ 暫停") }
+            "pause" -> { player.pause(); view.showController(); true to "⏸ 暫停" }
+            "resume" -> { player.play(); true to "▶ 播放" }
+            "seek_rel" -> {
+                val d = ((num ?: 10.0) * 1000).toLong()
+                hideCountdown()
+                val target = seekBy(d); remoteSeekRelease()
+                true to "${if (d >= 0) "快轉" else "倒退"} ${kotlin.math.abs(d) / 1000} 秒（${fmt(target / 1000)}）"
+            }
+            "seek_abs" -> {
+                val dur = player.duration
+                var t = ((num ?: 0.0) * 1000).toLong().coerceAtLeast(0L)
+                if (dur > 0) t = t.coerceAtMost(dur - 1000)
+                val cur = player.currentPosition
+                player.seekTo(t)
+                Log.i(TAG, "seek to=$t")
+                showSeekBar(t, t - cur); remoteSeekRelease()
+                true to "跳到 ${fmt(t / 1000)}"
+            }
+            "next" -> if (player.hasNextMediaItem()) { player.seekToNextMediaItem(); true to "下一支：${items.getOrNull(player.currentMediaItemIndex)?.title ?: ""}" } else false to "已經是最後一支"
+            "prev" -> { player.seekToPreviousMediaItem(); true to "上一支／從頭播放" }
+            "stop" -> { finish(); true to "已停止，回到 YTmate 首頁" }
+            "subs_toggle" -> { val l = toggleSubtitles(); (l != "這支影片沒有字幕") to l }
+            "subs" -> {
+                val v = value?.toString() ?: ""
+                if (v in setOf("en", "zh", "off")) { subPref = v; Prefs.set(this, "subs", v); applySubPref(); true to "字幕：$v" } else false to "字幕設定不對"
+            }
+            "quality" -> switchQuality(value?.toString() ?: "")
+            "volume_up", "volume_down", "volume_set", "mute" -> Remote.volume(action, value)
+            else -> false to "這個版本的 App 不認得這個操作"
+        }
+        Log.i(TAG, "remote control $action -> ${r.first} ${r.second}")
+        Remote.reportNow()
+        return r
+    }
+
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
         val code = event.keyCode
         val controllerShown = view.isControllerFullyVisible
@@ -704,6 +1134,15 @@ class PlayerActivity : Activity() {
                 if (code == KeyEvent.KEYCODE_DPAD_LEFT) seekBy(-seekStep(event.repeatCount))
                 return true
             }
+            // 「N 秒後播放下一支」顯示中：確認＝立刻播下一支（返回＝取消，在放開時處理）
+            if (countdownShown && !controllerShown && event.repeatCount == 0 &&
+                (code == KeyEvent.KEYCODE_DPAD_CENTER || code == KeyEvent.KEYCODE_ENTER || code == KeyEvent.KEYCODE_NUMPAD_ENTER)) {
+                Log.i(TAG, "countdown play next")
+                hideCountdown()
+                if (player.hasNextMediaItem()) player.seekToNextMediaItem()
+                consumedKey = code
+                return true
+            }
             when (code) {
                 KeyEvent.KEYCODE_MEDIA_NEXT, KeyEvent.KEYCODE_CHANNEL_DOWN -> { if (player.hasNextMediaItem()) player.seekToNextMediaItem(); return true }
                 KeyEvent.KEYCODE_MEDIA_PREVIOUS, KeyEvent.KEYCODE_CHANNEL_UP -> { player.seekToPreviousMediaItem(); return true }
@@ -712,7 +1151,10 @@ class PlayerActivity : Activity() {
                 KeyEvent.KEYCODE_MEDIA_PAUSE -> { player.pause(); view.showController(); return true }
                 KeyEvent.KEYCODE_MEDIA_FAST_FORWARD -> { player.seekForward(); return true }
                 KeyEvent.KEYCODE_MEDIA_REWIND -> { player.seekBack(); return true }
-                KeyEvent.KEYCODE_MENU -> { if (controllerShown) view.hideController() else view.showController(); return true }
+                KeyEvent.KEYCODE_MENU -> {
+                    if (controllerShown) view.hideController() else { menuOpened = true; view.showController() }
+                    return true
+                }
             }
             if (!controllerShown) {
                 when (code) {
@@ -736,7 +1178,11 @@ class PlayerActivity : Activity() {
         }
         if (code == KeyEvent.KEYCODE_BACK) {
             if (event.action == KeyEvent.ACTION_UP) {
-                if (controllerShown) view.hideController() else finish()
+                when {
+                    controllerShown -> view.hideController()
+                    countdownShown -> cancelCountdown()
+                    else -> finish()
+                }
             }
             return true
         }
@@ -750,7 +1196,7 @@ class PlayerActivity : Activity() {
         else -> 60_000L
     }
 
-    private fun seekBy(delta: Long) {
+    private fun seekBy(delta: Long): Long {
         val dur = player.duration
         var target = player.currentPosition + delta
         if (dur > 0) target = target.coerceAtMost(dur - 1000)
@@ -760,6 +1206,7 @@ class PlayerActivity : Activity() {
         Log.i(TAG, "seek to=$target")
         flashTitle(target)
         showSeekBar(target, actual)
+        return target
     }
 
     private fun focusName(): String = try {
@@ -788,15 +1235,21 @@ class PlayerActivity : Activity() {
         return if (h > 0) "%d:%02d:%02d".format(h, m, x) else "%d:%02d".format(m, x)
     }
 
-    /** 記住目前這支看到哪裡（離開播放器、換支時呼叫）。 */
+    /** 記住目前這支看到哪裡（離開播放器、換清單時呼叫）。 */
     private fun saveCurrent() {
         if (!::player.isInitialized || curIdx !in items.indices) return
         if (player.currentMediaItemIndex == curIdx) {
             curPos = player.currentPosition
             curDur = player.duration.takeIf { d -> d > 0 } ?: items[curIdx].durMs
         }
-        Resume.save(this, items[curIdx].vid, curPos, curDur, RESUME_MIN_MS)
+        rememberPos(curIdx, curPos, curDur, false)
         lastVideoId = items[curIdx].vid
+    }
+
+    override fun onStart() {
+        super.onStart()
+        Remote.attachPlayer(this)
+        Remote.onStart(this)
     }
 
     override fun onStop() {
@@ -805,32 +1258,63 @@ class PlayerActivity : Activity() {
             saveCurrent()
             player.pause()     // 按首頁鍵離開時暫停（回來可以繼續）
         }
+        Remote.onStop()
     }
 
     override fun onDestroy() {
         ui.removeCallbacksAndMessages(null)
+        cancelPrefetch()
+        prefetchExec.shutdownNow()
+        if (Remote.player === this) Remote.attachPlayer(null)
+        if (current?.get() === this) current = null
         session?.release()
         session = null
         if (::player.isInitialized) player.release()
         super.onDestroy()
+        Remote.reportNow()
+    }
+
+    /** 時間軸上的章節分段點。 */
+    private class TickView(ctx: Context) : View(ctx) {
+        private var marks = LongArray(0)
+        private var dur = 0L
+        private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.parseColor("#FDE68A") }
+
+        fun setMarks(m: LongArray) { marks = m; invalidate() }
+        fun setDuration(d: Long) { if (d != dur) { dur = d; invalidate() } }
+
+        override fun onDraw(canvas: Canvas) {
+            super.onDraw(canvas)
+            if (dur <= 0 || marks.isEmpty()) return
+            val w = width.toFloat()
+            val h = height.toFloat()
+            val bw = resources.displayMetrics.density * 3f
+            for (t in marks) {
+                val x = (w * t / dur).coerceIn(0f, w - bw)
+                canvas.drawRect(x, 0f, x + bw, h, paint)
+            }
+        }
     }
 }
 
-/** 長影片的播放位置（App 私有空間，最多記 200 支，舊的自動淘汰）。 */
+/** 播放位置（App 私有空間，最多記 200 支，舊的自動淘汰）。2026-10-17：所有影片都記（音樂由播放器排除）。 */
 object Resume {
     private const val FILE = "ytmate_resume"
     private const val MAX = 200
 
-    fun get(ctx: Context, vid: String): Long {
-        if (vid.isEmpty()) return 0L
-        return ctx.getSharedPreferences(FILE, Context.MODE_PRIVATE).getString(vid, null)
-            ?.substringBefore(',')?.toLongOrNull() ?: 0L
+    fun get(ctx: Context, vid: String): Long = entry(ctx, vid).first
+
+    /** （位置, 記錄時間）；沒有記錄回傳 (0, 0)。 */
+    fun entry(ctx: Context, vid: String): Pair<Long, Long> {
+        if (vid.isEmpty()) return 0L to 0L
+        val v = ctx.getSharedPreferences(FILE, Context.MODE_PRIVATE).getString(vid, null) ?: return 0L to 0L
+        return (v.substringBefore(',').toLongOrNull() ?: 0L) to (v.substringAfter(',', "0").toLongOrNull() ?: 0L)
     }
 
-    /** 看了 10 秒以上、還沒看到最後 20 秒、而且影片夠長才記；否則清掉。 */
+    /** 看了 10 秒以上、還沒看到最後 20 秒才記；否則清掉。長度不知道時只看「10 秒以上」。 */
     fun save(ctx: Context, vid: String, pos: Long, dur: Long, minDur: Long) {
         if (vid.isEmpty()) return
-        if (dur < minDur || pos < 10_000L || pos > dur - 20_000L) {
+        if (pos < 10_000L || (dur > 0 && (dur < minDur || pos > dur - 20_000L))) {
             Log.i(PlayerActivity.TAG, "resume skip vid=$vid pos=$pos dur=$dur")
             clear(ctx, vid); return
         }
@@ -845,8 +1329,9 @@ object Resume {
         Log.i(PlayerActivity.TAG, "resume save vid=$vid pos=$pos")
     }
 
+    /** 看完了：記成「位置 0」（記錄時間＝現在），比伺服器舊的進度新，下次從頭播。 */
     fun clear(ctx: Context, vid: String) {
         if (vid.isEmpty()) return
-        ctx.getSharedPreferences(FILE, Context.MODE_PRIVATE).edit().remove(vid).apply()
+        ctx.getSharedPreferences(FILE, Context.MODE_PRIVATE).edit().putString(vid, "0,${System.currentTimeMillis()}").apply()
     }
 }
