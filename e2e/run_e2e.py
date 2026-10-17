@@ -432,7 +432,8 @@ def remote_cases(pg):
     sm = [l for l in logcat().splitlines()[n0:] if "summary shown" in l]
     check("[摘要] 選單鍵叫出控制列時，右邊顯示這支影片的中文摘要", sm and not sm[-1].rstrip().endswith("len=-1") and not sm[-1].rstrip().endswith("len=0"), sm[-1:])
     shot("14_summary")
-    key("KEYCODE_BACK", 1, 1)
+    if ctl_shown_now():                   # 截圖較慢時控制列可能已經自己收起：這時再按返回會離開播放器
+        key("KEYCODE_BACK", 1, 1)
     # ⑧ 預先下載下一支（播放暫存開著時）
     ci = json.loads(pg.ev("window.YTmateTV && YTmateTV.cacheInfo ? YTmateTV.cacheInfo() : '{}'") or "{}")
     INFO["cache"] = ci
