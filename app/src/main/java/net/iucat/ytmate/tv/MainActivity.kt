@@ -90,6 +90,8 @@ class MainActivity : Activity() {
             }
         }
         web.webChromeClient = WebChromeClient()
+        // 2026-10-17：關掉 Android 8 以上的系統焦點外框（小米電視上會在畫面上畫出大黃框；選取效果由頁面自己畫）
+        if (Build.VERSION.SDK_INT >= 26) web.defaultFocusHighlightEnabled = false
         web.isFocusable = true
         web.isFocusableInTouchMode = true
         web.requestFocus()

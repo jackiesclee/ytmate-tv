@@ -111,7 +111,10 @@ class PlayerActivity : Activity() {
         // 「N 秒後播放下一支」：影片要夠長才顯示（自動測試的影片只有 40 秒，測試版門檻較低）
         private val COUNTDOWN_MIN_DUR = if (BuildConfig.E2E) 20_000L else 60_000L
         private const val COUNTDOWN_MS = 5_000L
-        private const val PREFETCH_SEC = 180L            // 預先下載下一支的前幾秒
+        // 2026-10-17（v1.1.1，使用者回報播放沒以前順）：預先下載改成更保守——只抓下一支的前 90 秒、
+        // 目前這支要已經整支緩衝好（或往前 3 分鐘以上）、播放 15 秒以上才開始；一卡頓就停止預先下載。
+        private const val PREFETCH_SEC = 90L
+        private const val PREFETCH_AFTER_MS = 15_000L
         @Volatile
         var pending: String? = null      // MainActivity 傳來的播放清單 JSON（清單可能很長，不放 Intent）
         @Volatile
@@ -190,6 +193,11 @@ class PlayerActivity : Activity() {
     private val prefetchExec = Executors.newSingleThreadExecutor()
     @Volatile private var prefetchWriter: CacheWriter? = null
     private var prefetchedIdx = -1
+    // 卡頓統計（回報給手機遙控頁／伺服器 log，方便查「為什麼不順」）
+    private var stalls = 0
+    private var stallMs = 0L
+    private var stallStart = 0L
+    private var wasReady = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -205,10 +213,15 @@ class PlayerActivity : Activity() {
             .setReadTimeoutMs(30000)
             .setDefaultRequestProperties(if (cookie.isNotEmpty()) mapOf("Cookie" to cookie) else emptyMap())
         // 播放暫存（依剩餘空間自動決定；空間不夠時不暫存）
+        // v1.1.1：播放器對暫存「只讀不寫」——有預先下載好的部分就直接讀，正在播的影片不再整支寫進電視的儲存空間
+        // （舊電視的儲存晶片很慢，邊播邊寫會拖慢播放）；只有「預先下載下一支的開頭」會寫入暫存。
         val cache = MediaCache.get(this)
         val dataSource: DataSource.Factory = if (cache != null) {
+            cacheFactory = CacheDataSource.Factory().setCache(cache).setUpstreamDataSourceFactory(http)
+                .setFlags(CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR)
             CacheDataSource.Factory().setCache(cache).setUpstreamDataSourceFactory(http)
-                .setFlags(CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR).also { f -> cacheFactory = f }
+                .setCacheWriteDataSinkFactory(null)
+                .setFlags(CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR)
         } else http
         // 緩衝：網路有餘力就往前多抓（最多 5 分鐘）；記憶體小的舊電視少抓一點
         val am = getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
@@ -261,6 +274,7 @@ class PlayerActivity : Activity() {
                         applyResume(i)
                     curIdx = i; curPos = 0L; curDur = 0L
                     lastVideoId = items[i].vid
+                    stalls = 0; stallMs = 0L; stallStart = 0L; wasReady = false
                     requestInfo(i)
                     applyChapters(i)
                     if (prefetchedIdx != i) cancelPrefetch()
@@ -330,8 +344,13 @@ class PlayerActivity : Activity() {
                 Remote.reportNow()
             }
 
+            override fun onPositionDiscontinuity(oldPosition: Player.PositionInfo, newPosition: Player.PositionInfo, reason: Int) {
+                if (reason == Player.DISCONTINUITY_REASON_SEEK || reason == Player.DISCONTINUITY_REASON_SEEK_ADJUSTMENT) lastSeekAt = SystemClock.uptimeMillis()
+            }
+
             override fun onPlaybackStateChanged(state: Int) {
                 updateKeepScreenOn()
+                trackStall(state)
                 if (state == Player.STATE_READY) {
                     val i = player.currentMediaItemIndex
                     if (i in netRetry.indices) netRetry[i] = 0
@@ -1009,6 +1028,31 @@ class PlayerActivity : Activity() {
 
     // ══ 預先下載下一支的開頭（有播放暫存時）══
     private var prefetchDiagAt = 0L
+    private var stallStartLast = 0L
+    private var lastSeekAt = 0L                      // 自己快轉／跳轉造成的緩衝不算卡頓
+
+    /** 播放中變成「緩衝中」＝卡頓：記次數與時間；一卡頓就先停掉預先下載（把頻寬讓給目前這支）。 */
+    private fun trackStall(state: Int) {
+        val now = SystemClock.uptimeMillis()
+        if (state == Player.STATE_READY) {
+            if (stallStart > 0) {
+                val d = now - stallStart
+                stallMs += d
+                Log.i(TAG, "stall end item=${player.currentMediaItemIndex} ms=$d total=$stalls/${stallMs}ms")
+                stallStart = 0L
+            }
+            wasReady = true
+        } else if (state == Player.STATE_BUFFERING && wasReady && player.playWhenReady && !seekShown && stallStart == 0L &&
+            now - lastSeekAt > 3000) {
+            stalls++
+            stallStart = now
+            stallStartLast = now
+            val pf = prefetchWriter != null
+            if (pf) cancelPrefetch()
+            Log.i(TAG, "stall start item=${player.currentMediaItemIndex} n=$stalls pos=${player.currentPosition} prefetching=$pf")
+            Remote.reportNow()
+        }
+    }
 
     private fun maybePrefetch() {
         val f = cacheFactory ?: return
@@ -1018,7 +1062,9 @@ class PlayerActivity : Activity() {
         val dur = player.duration
         val ahead = player.bufferedPosition - player.currentPosition
         val playedMs = SystemClock.uptimeMillis() - playingSince
-        val ready = player.isPlaying && playedMs >= 8000 && (ahead > 60_000L || (dur > 0 && player.bufferedPosition >= dur - 1000))
+        val fullyBuffered = dur > 0 && player.bufferedPosition >= dur - 1000
+        val ready = player.isPlaying && player.playbackState == Player.STATE_READY && playedMs >= PREFETCH_AFTER_MS &&
+            (fullyBuffered || ahead > 180_000L) && SystemClock.uptimeMillis() - stallStartLast > 30_000L
         if (!ready) {
             // 自動測試版：每 5 秒記一次還沒開始預先下載的原因（方便查模擬器上的時序問題）
             if (BuildConfig.E2E && SystemClock.uptimeMillis() - prefetchDiagAt > 5000) {
@@ -1036,9 +1082,9 @@ class PlayerActivity : Activity() {
             try {
                 val size = headSize(src.url)
                 var len = if (size > 0) {
-                    if (durMs > 0) minOf(size, maxOf(8L shl 20, size * (PREFETCH_SEC * 1000) / durMs + (2L shl 20))) else minOf(size, 30L shl 20)
-                } else 30L shl 20
-                if (cap > 0) len = minOf(len, cap / 3)
+                    if (durMs > 0) minOf(size, maxOf(4L shl 20, size * (PREFETCH_SEC * 1000) / durMs + (1L shl 20))) else minOf(size, 15L shl 20)
+                } else 15L shl 20
+                if (cap > 0) len = minOf(len, cap / 4)
                 Log.i(TAG, "prefetch item=$n kind=${src.kind} bytes=$len size=$size")
                 val w = CacheWriter(f.createDataSource(), DataSpec.Builder().setUri(Uri.parse(src.url)).setPosition(0).setLength(len).build(), null, null)
                 prefetchWriter = w
@@ -1088,6 +1134,8 @@ class PlayerActivity : Activity() {
                 .put("pos", player.currentPosition.coerceAtLeast(0L) / 1000.0).put("dur", dur / 1000.0)
                 .put("index", i).put("count", items.size)
                 .put("buffered", (player.bufferedPosition - player.currentPosition).coerceAtLeast(0L) / 1000.0)
+                .put("stalls", stalls).put("stall_ms", stallMs + (if (stallStart > 0) SystemClock.uptimeMillis() - stallStart else 0L))
+                .put("prefetching", prefetchWriter != null).put("cache", cacheFactory != null)
         }
         return o
     }

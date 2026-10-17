@@ -389,6 +389,7 @@ def remote_cases(pg):
     check("[遙控] 從手機指定的時間點開始（15 秒）", wait_for(lambda: player_log(r"start pos=15000"), 10, 0.5), player_log("start pos|playlist loaded")[-2:])
     st = wait_for(lambda: rstate() if rstate().get("screen") == "player" and rstate().get("video_id") == "h264" and rstate().get("pos", 0) >= 14 else None, 25, 1)
     check("[遙控] 電視回報正在播什麼（影片、位置、第幾支）", st and st.get("count") == 2, rstate())
+    check("[卡頓] 電視回報卡頓統計（次數、秒數、預先下載、暫存）", st and all(k in st for k in ("stalls", "stall_ms", "prefetching", "cache")), {k: (st or {}).get(k) for k in ("stalls", "stall_ms", "prefetching", "cache")})
     wait_for(lambda: player_log(r"playing=true"), 15, 0.5)
     wait_for(ctl_hidden_now, 10, 0.5)
     # ② 暫停／繼續
@@ -486,6 +487,10 @@ def home_rows_cases(pg):
     pg.ev("S.homeFocus = null; loadHome()")          # 像剛打開 App 一樣（焦點從大橫幅開始）
     st = wait_for(lambda: pg.state() if "cont" in (pg.state().get("rows") or []) else None, 20, 1)
     check("[首頁] 一排一排：繼續觀看、最新同步、我的節目", st and set(["cont", "recent", "shows"]) <= set(st["rows"]), st)
+    pg.ev("document.getElementById('scroller').focus()")
+    time.sleep(0.3)
+    act = pg.ev("document.activeElement === document.body || document.activeElement === document.documentElement ? 'body' : (document.activeElement.id || document.activeElement.tagName)")
+    check("[首頁] 焦點不會停在捲動區（不會出現瀏覽器的黃色外框）", act == "body", act)
     check("[首頁] 一開始焦點在大橫幅（最新節目）", pg.state().get("focusAct") == "hero" and "最新節目" in pg.state().get("spot", ""), pg.state())
     shot("17_home_rows")
     h0 = pg.state().get("heroIdx")

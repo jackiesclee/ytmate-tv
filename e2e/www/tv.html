@@ -13,6 +13,10 @@
    版面：上方「焦點資訊區」固定不動（大橫幅／選到的影片資訊／頻道資訊），下方各排可以上下捲動。 */
 :root{--bg:#09090f;--card:#171724;--text:#f4f4f8;--muted:#a3a3b8;--pink:#ec4899;--violet:#7c3aed;--ring:#ffffff}
 *{box-sizing:border-box;margin:0;padding:0}
+/* 2026-10-17：新版網頁核心會讓「可以捲動的區塊」也能拿到焦點，小米電視上會畫出一個大黃色外框（使用者回報很醜）。
+   選取效果都由 .focus 自己畫，瀏覽器內建的焦點外框一律關掉；按鍵時也會把焦點從捲動區拿掉（見 keydown）。 */
+*:focus{outline:none !important}
+html,body,#scroller,#view,#spot{outline:none;-webkit-tap-highlight-color:rgba(0,0,0,0)}
 html,body{background:#09090f;background:var(--bg);color:#f4f4f8;color:var(--text);font-family:'Noto Sans TC','Noto Sans CJK TC','PingFang TC','Microsoft JhengHei',sans-serif;overflow:hidden;height:100%}
 body{font-size:1.2vw}
 .fill{position:fixed;top:0;left:0;right:0;bottom:0}
@@ -145,7 +149,7 @@ body{font-size:1.2vw}
   <div class="topr row"><span class="clock" id="clock"></span><div class="gear f" id="gear" data-act="settings" data-top="1">⚙</div></div>
 </div>
 <div id="spot"></div>
-<div id="scroller"><div id="view"></div></div>
+<div id="scroller" tabindex="-1"><div id="view"></div></div>
 <div id="loading" class="fill"><span class="spin"></span>載入中…</div>
 <div class="toast" id="toast"></div>
 <div id="notice"><img id="noticeImg" alt="" style="display:none"><div id="noticeText"></div></div>
@@ -310,8 +314,12 @@ function keyName(e) {
   if (k === 'ContextMenu' || c === 82 || c === 93) return 'MENU';
   return '';
 }
+// 瀏覽器自己把焦點放到捲動區（會畫外框、也會搶走方向鍵捲動）→ 拿掉，所有選取都由頁面的 .focus 處理
+function dropNativeFocus() { var a = document.activeElement; if (a && a !== document.body && a.blur) a.blur(); }
+document.addEventListener('focusin', function () { dropNativeFocus(); });
 document.addEventListener('keydown', function (e) {
   S.lastKey = Date.now();
+  dropNativeFocus();
   if (isOn('saver')) { e.preventDefault(); if (!SAVER_ONLY) hideSaver(); return; }   // 螢幕保護中：任何鍵只用來關掉它
   var k = keyName(e); if (!k) return;
   e.preventDefault();
