@@ -321,7 +321,8 @@ function keyName(e) {
 // 瀏覽器自己把焦點放到捲動區（會畫外框、也會搶走方向鍵捲動）→ 拿掉，所有選取都由頁面的 .focus 處理
 function dropNativeFocus() { var a = document.activeElement; if (a && a !== document.body && a.blur) a.blur(); }
 document.addEventListener('focusin', function () { dropNativeFocus(); });
-document.addEventListener('keydown', function (e) {
+document.addEventListener('keydown', onKeyDown);
+function onKeyDown(e) {
   S.lastKey = Date.now();
   dropNativeFocus();
   if (isOn('saver')) { e.preventDefault(); if (!SAVER_ONLY) hideSaver(); return; }   // 螢幕保護中：任何鍵只用來關掉它
@@ -330,10 +331,12 @@ document.addEventListener('keydown', function (e) {
   if (isOn('player')) { playerKey(k); return; }
   // 長按確認鍵：待播清單那排＝刪除；其他影片卡片＝加入待播清單；頻道卡片＝整個頻道加入。短按照舊（放開時才決定是哪一種）
   if (k === 'OK' && !isOn('settings') && hasLongAction(S.focusEl)) {
+    // 新版 App（v1.1.2 起）幫忙判斷短按／長按，直接照它說的做
+    if (e.okKind) { if (e.okKind === 'long') longAction(S.focusEl); else activate(S.focusEl); return; }
     if (!S.okDown) {
       var d0 = S.okDown = { t: Date.now(), el: S.focusEl, done: false };
       // 保險：萬一電視沒送「放開」也沒送「重複按下」，1.2 秒後當成短按（確認鍵不會失靈）
-      d0.timer = setTimeout(function () { if (S.okDown === d0 && !d0.done) { S.okDown = null; activate(d0.el); } }, 1200);
+      d0.timer = setTimeout(function () { if (S.okDown === d0) { S.okDown = null; if (!d0.done) activate(d0.el); } }, 1200);
     }
     // 遙控器按住不放會一直送「重複按下」：收到重複按下（或按超過 0.6 秒）就算長按
     else if (!S.okDown.done && (e.repeat || Date.now() - S.okDown.t >= LONG_MS)) { S.okDown.done = true; longAction(S.okDown.el); }
@@ -343,7 +346,12 @@ document.addEventListener('keydown', function (e) {
   else if (k === 'OK') activate(S.focusEl);
   else if (k === 'BACK') { if (!window.tvBack() && !NATIVE) toast('已經在首頁'); }
   else if (k === 'MENU') window.tvMenu();
-});
+}
+// v1.1.2：App 判斷好確認鍵是短按還是長按再呼叫這裡（網頁核心收不到遙控器「按住」的重複訊號）
+window.tvOkKey = function (kind) {
+  onKeyDown({ key: 'Enter', keyCode: 13, repeat: false, okKind: kind === 'long' ? 'long' : 'short', preventDefault: function () {} });
+};
+try { if (NATIVE && NATIVE.wantOkKeys) NATIVE.wantOkKeys(true); } catch (e) {}
 var LONG_MS = 600;           // 按住確認鍵超過這麼久＝長按
 document.addEventListener('keyup', function (e) {
   if (keyName(e) !== 'OK' || !S.okDown) return;

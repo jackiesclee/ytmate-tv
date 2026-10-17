@@ -9,9 +9,11 @@ import android.media.MediaCodecList
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.SystemClock
 import android.provider.Settings
 import android.view.KeyEvent
 import android.view.View
+import android.util.Log
 import android.webkit.CookieManager
 import android.webkit.JavascriptInterface
 import android.webkit.WebChromeClient
@@ -43,6 +45,12 @@ class MainActivity : Activity() {
 
     private lateinit var web: WebView
     private var lastBack = 0L
+    // v1.1.2：確認鍵的短按／長按由 App 判斷再告訴頁面（網頁核心收不到遙控器「按住」的重複訊號，頁面自己判斷不可靠）。
+    // 頁面呼叫 YTmateTV.wantOkKeys(true) 才啟用；換頁就關掉（配對頁、離線頁照舊）。
+    @Volatile private var pageOkKeys = false
+    private var okDownAt = 0L
+    private var okLongSent = false
+    private val OK_LONG_MS = 600L
     @Volatile private var lastRelogin = 0L
     private val base = BuildConfig.BASE_URL
     private val baseHost: String = Uri.parse(BuildConfig.BASE_URL).host ?: ""
@@ -83,6 +91,10 @@ class MainActivity : Activity() {
 
             override fun onReceivedHttpError(view: WebView, request: WebResourceRequest, resp: WebResourceResponse) {
                 if (request.isForMainFrame && resp.statusCode >= 500) showOffline("伺服器暫時沒有回應（HTTP ${resp.statusCode}）")
+            }
+
+            override fun onPageStarted(view: WebView, url: String?, favicon: android.graphics.Bitmap?) {
+                pageOkKeys = false
             }
 
             override fun onPageFinished(view: WebView, url: String) {
@@ -162,7 +174,24 @@ class MainActivity : Activity() {
             if (event.action == KeyEvent.ACTION_UP) web.evaluateJavascript("window.tvMenu && window.tvMenu()", null)
             return true
         }
+        if (pageOkKeys && isOkKey(event.keyCode)) {
+            if (event.action == KeyEvent.ACTION_DOWN) {
+                if (event.repeatCount == 0) { okDownAt = SystemClock.uptimeMillis(); okLongSent = false }
+                else if (okDownAt > 0 && !okLongSent) { okLongSent = true; okToPage("long") }   // 按住不放（遙控器送重複按下）
+            } else if (event.action == KeyEvent.ACTION_UP) {
+                if (okDownAt > 0 && !okLongSent) okToPage(if (SystemClock.uptimeMillis() - okDownAt >= OK_LONG_MS) "long" else "short")
+                okDownAt = 0L
+            }
+            return true
+        }
         return super.dispatchKeyEvent(event)
+    }
+
+    private fun isOkKey(code: Int) = code == KeyEvent.KEYCODE_DPAD_CENTER || code == KeyEvent.KEYCODE_ENTER || code == KeyEvent.KEYCODE_NUMPAD_ENTER
+
+    private fun okToPage(kind: String) {
+        Log.i("YTmateTV", "page ok key=$kind")
+        web.evaluateJavascript("window.tvOkKey && window.tvOkKey('$kind')", null)
     }
 
     private fun handleBack() {
@@ -248,6 +277,10 @@ class MainActivity : Activity() {
         fun remoteAck(id: String, ok: Boolean, msg: String) = Remote.ack(id, ok, msg)
 
         /** 頁面查過了：沒有待播清單 → 播放器回到頻道頁。 */
+        /** v1.1.2：頁面要 App 幫忙判斷確認鍵短按／長按（結果用 window.tvOkKey('short'|'long') 告訴頁面） */
+        @JavascriptInterface
+        fun wantOkKeys(on: Boolean) { pageOkKeys = on }
+
         @JavascriptInterface
         fun queueEmpty() { runOnUiThread { PlayerActivity.onQueueEmpty() } }
 

@@ -413,6 +413,7 @@ class PlayerActivity : Activity() {
         setIntent(intent)
         val json = pending ?: return
         Log.i(TAG, "playlist replace (new intent)")
+        if (upShown) closeUpNext()           // 換清單時收起「接下來播放」（內容已經不對了）
         saveCurrent()
         cancelPrefetch()
         ui.removeCallbacks(queueTimeout)
@@ -1298,6 +1299,7 @@ class PlayerActivity : Activity() {
         view.hideController()
         hideCountdown()
         upShown = true
+        upOpenHeld = true            // 打開面板的那次長按還沒放開：放開／繼續按住都不算面板上的操作
         upOpenedAt = SystemClock.uptimeMillis()
         upQueueLoaded = false
         upSel = 0
@@ -1390,9 +1392,9 @@ class PlayerActivity : Activity() {
                 code == KeyEvent.KEYCODE_DPAD_DOWN -> moveUpSel(+1)
                 isOk(code) -> {
                     if (event.repeatCount == 0) {
-                        // 打開面板的那次長按還沒放開：不算新的按鍵
-                        if (okDownAt == 0L || consumedKey != code) { okDownAt = SystemClock.uptimeMillis(); okLongDone = false; consumedKey = code }
-                    } else if (okDownAt > 0 && !okLongDone && consumedKey == code && SystemClock.uptimeMillis() - okDownAt < 30_000) {
+                        // 新的一次按下（打開面板那次已經放開）
+                        upOpenHeld = false; okDownAt = SystemClock.uptimeMillis(); okLongDone = false; consumedKey = code
+                    } else if (!upOpenHeld && okDownAt > 0 && !okLongDone && consumedKey == code) {
                         okLongDone = true; deleteUpSel()
                     }
                 }
@@ -1402,6 +1404,7 @@ class PlayerActivity : Activity() {
         if (event.action == KeyEvent.ACTION_UP) {
             when {
                 code == KeyEvent.KEYCODE_BACK || code == KeyEvent.KEYCODE_MENU -> closeUpNext()
+                isOk(code) && upOpenHeld -> { upOpenHeld = false; okDownAt = 0L; okLongDone = false; consumedKey = 0 }
                 isOk(code) -> {
                     val pressedHere = okDownAt > 0 && consumedKey == code
                     val held = SystemClock.uptimeMillis() - okDownAt
@@ -1418,6 +1421,7 @@ class PlayerActivity : Activity() {
     }
     private val openedAt: Long get() = if (upShown) upOpenedAt else 0L
     private var upOpenedAt = 0L
+    private var upOpenHeld = false
 
     private fun playUpSel() {
         val e = upEntries.getOrNull(upSel) ?: return
