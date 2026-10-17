@@ -219,8 +219,10 @@ function toast(msg, ms) { var t = $('toast'); t.textContent = msg; t.className =
 function api(url, opt) {
   return fetch(url, opt || { credentials: 'same-origin' }).then(function (r) {
     if (r.status === 401) {                     // 登入過期：App 先用裝置金鑰自動重新登入；不行才回配對畫面
+      // 同時有好幾個請求都 401（例如頻道＋待播清單）：只重新登入一次
+      if (api.relogging) throw new Error('重新登入中…');
       var re = false; try { re = !!(NATIVE && NATIVE.relogin && NATIVE.relogin()); } catch (e) {}
-      if (!re) location.href = '/tv/pair';
+      if (re) api.relogging = true; else location.href = '/tv/pair';
       throw new Error(re ? '重新登入中…' : '需要重新配對');
     }
     return r.json().then(function (j) { if (!r.ok || j.error) throw new Error(j.error || ('HTTP ' + r.status)); return j; });
