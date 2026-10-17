@@ -195,11 +195,17 @@ var DECODERS = nativeCall('decoders');          // App 回報這台電視能硬�
 //   subs：en＝英文字幕優先（預設）、zh＝中文優先、off＝不顯示字幕
 //   cache：auto＝依電視剩餘空間自動決定播放暫存（最多 500MB）、off＝不暫存（2026-10-17）
 var PREF_DEFAULT = { quality: 'auto', subs: 'en', cache: 'auto' };
-function getPref(k) {
+// 2026-10-17：小米電視（含小米盒子、Redmi 電視）預設用 480p 省流量畫質（H.264，最省電視解碼與兩岸網路頻寬，播放最順）。
+// 只改「預設值」：在 ⚙ 設定裡自己選過畫質的，照自己選的。
+var DEVINFO = (function () { try { return JSON.parse(nativeCall('deviceInfo') || '{}') || {}; } catch (e) { return {}; } })();
+var IS_XIAOMI = /xiaomi|mitv|mibox|redmi/i.test((DEVINFO.model || '') + ' ' + nativeCall('deviceName') + ' ' + navigator.userAgent);
+if (IS_XIAOMI) PREF_DEFAULT.quality = 'low';
+function rawPref(k) {        // 使用者自己存過的值（沒存過＝''）
   var v = '';
   try { v = NATIVE && NATIVE.getPref ? NATIVE.getPref(k) : (window.localStorage.getItem('ytmate_' + k) || ''); } catch (e) {}
-  return v || PREF_DEFAULT[k];
+  return v || '';
 }
+function getPref(k) { return rawPref(k) || PREF_DEFAULT[k]; }
 function setPref(k, v) {
   try { if (NATIVE && NATIVE.setPref) NATIVE.setPref(k, v); else window.localStorage.setItem('ytmate_' + k, v); } catch (e) {}
 }
@@ -410,7 +416,7 @@ window.tvVisible = function (v) { S.visible = !!v; S.lastKey = Date.now(); if (!
 // 給自動測試讀目前狀態（不影響使用）
 window.tvState = function () { return JSON.stringify({ view: S.view, focusAct: S.focusEl && S.focusEl.getAttribute('data-act'), focusId: S.focusEl && S.focusEl.getAttribute('data-id'),
   focusI: S.focusEl && S.focusEl.getAttribute('data-i'), focusVid: S.focusEl && S.focusEl.getAttribute('data-vid'), focusRow: S.focusEl && S.focusEl.getAttribute('data-row'),
-  scrollTop: $('scroller').scrollTop, lite: document.documentElement.className.indexOf('lite') >= 0, decoders: DECODERS, chrome: CHROME, busy: !!S.refreshing,
+  scrollTop: $('scroller').scrollTop, lite: document.documentElement.className.indexOf('lite') >= 0, decoders: DECODERS, chrome: CHROME, xiaomi: IS_XIAOMI, quality: getPref('quality'), busy: !!S.refreshing,
   rows: Object.keys(S.rowItems), saver: isOn('saver'), notice: isOn('notice') ? $('noticeText').textContent : '', spot: ($('spot').textContent || '').slice(0, 200), heroIdx: S.heroIdx }); };
 
 function activate(el) {
@@ -954,7 +960,7 @@ function openSettings() {
   S.prevFocus = S.focusEl; $('settings').className = 'fill on'; setFocus($('settings').querySelector('.btn'), true);
 }
 function prefLabels() {
-  $('qbtn').textContent = Q_LABEL[getPref('quality')] || Q_LABEL.auto; $('sbtn').textContent = S_LABEL[getPref('subs')] || S_LABEL.en;
+  $('qbtn').textContent = (Q_LABEL[getPref('quality')] || Q_LABEL.auto) + (IS_XIAOMI && !rawPref('quality') ? '（小米電視預設）' : ''); $('sbtn').textContent = S_LABEL[getPref('subs')] || S_LABEL.en;
   var hasCache = nativeHas('cacheInfo');
   $('cbtn').style.display = hasCache ? '' : 'none'; $('ccbtn').style.display = hasCache ? '' : 'none';
   $('cbtn').textContent = C_LABEL[getPref('cache')] || C_LABEL.auto;
