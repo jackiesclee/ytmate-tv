@@ -438,14 +438,14 @@ def remote_cases(pg):
     if ci.get("cap", 0) > 0:
         pf = wait_for(lambda: player_log(r"prefetch item=1 .*done"), 30, 1)
         files = [x for x in srvlog()[n_srv:] if x["kind"] == "req" and x["path"].startswith("/api/files/video/") and x.get("range")]
-        check("[預先下載] 目前這支緩衝夠了 → 在背景先下載下一支的開頭", pf and files, (player_log("prefetch")[-2:], [f["path"] + " " + f["range"] for f in files][-3:]))
+        check("[預先下載] 目前這支緩衝夠了 → 在背景先下載下一支的開頭", pf and files, (player_log("prefetch|playing=|transition")[-4:], [f["path"] + " " + f["range"] for f in files][-3:]))
     else:
         check("[預先下載] 模擬器空間不足，播放暫存自動關閉（不佔空間）", ci.get("free", 0) < 100 * 1024 * 1024 * 10, ci)
-    # ⑨ 「5 秒後播放下一支」：返回＝取消
+    # ⑨ 「5 秒後播放下一支」：返回＝取消（重新送一次清單、從 31 秒開始，不受前面等待時間影響）
     adb("logcat", "-c")
-    ack_of(inject("control", {"action": "seek_abs", "value": 31}))
-    cd = wait_for(lambda: player_log(r"countdown show item=0"), 12, 0.5)
-    check("[下一支] 快播完時右下角出現「N 秒後播放：下一支」", cd, player_log("countdown|seek to|transition")[-3:])
+    ack_of(inject("play", {"video_ids": ["h264", "av1"], "start_pos": 31}))
+    cd = wait_for(lambda: player_log(r"countdown show item=0"), 15, 0.5)
+    check("[下一支] 快播完時右下角出現「N 秒後播放：下一支」", cd, player_log("countdown|playlist loaded|transition")[-3:])
     shot("15_countdown")
     key("KEYCODE_BACK", 1, 1)
     check("[下一支] 按返回 → 取消自動播放", player_log(r"countdown cancel item=0"), player_log("countdown")[-3:])

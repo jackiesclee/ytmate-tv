@@ -1008,15 +1008,25 @@ class PlayerActivity : Activity() {
     }
 
     // ══ 預先下載下一支的開頭（有播放暫存時）══
+    private var prefetchDiagAt = 0L
+
     private fun maybePrefetch() {
         val f = cacheFactory ?: return
         val i = player.currentMediaItemIndex
         val n = i + 1
-        if (!player.isPlaying || n !in items.indices || prefetchedIdx == n) return
-        if (SystemClock.uptimeMillis() - playingSince < 8000) return
+        if (n !in items.indices || prefetchedIdx == n) return
         val dur = player.duration
         val ahead = player.bufferedPosition - player.currentPosition
-        if (!(ahead > 60_000L || (dur > 0 && player.bufferedPosition >= dur - 1000))) return
+        val playedMs = SystemClock.uptimeMillis() - playingSince
+        val ready = player.isPlaying && playedMs >= 8000 && (ahead > 60_000L || (dur > 0 && player.bufferedPosition >= dur - 1000))
+        if (!ready) {
+            // 自動測試版：每 5 秒記一次還沒開始預先下載的原因（方便查模擬器上的時序問題）
+            if (BuildConfig.E2E && SystemClock.uptimeMillis() - prefetchDiagAt > 5000) {
+                prefetchDiagAt = SystemClock.uptimeMillis()
+                Log.i(TAG, "prefetch wait item=$n playing=${player.isPlaying} played=$playedMs ahead=$ahead buffered=${player.bufferedPosition} dur=$dur")
+            }
+            return
+        }
         prefetchedIdx = n
         val it = items[n]
         val src = it.sources[srcIdx[n]]
