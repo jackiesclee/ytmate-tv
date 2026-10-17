@@ -133,13 +133,20 @@ class Page:
             time.sleep(1)
 
         def find():
+            # App 關掉再開時，舊的偵錯通道可能還在：每一個都試（新的優先）
             names = re.findall(r"@(webview_devtools_remote_\d+)", sh("cat", "/proc/net/unix"))
-            if not names:
-                return None
-            adb("forward", "tcp:9222", "localabstract:" + names[-1])
-            pages = json.load(urllib.request.urlopen("http://127.0.0.1:9222/json", timeout=5))
-            return next((p for p in pages if p.get("type") == "page" and url_part in p.get("url", "")
-                         and p.get("webSocketDebuggerUrl")), None)
+            for name in reversed(list(dict.fromkeys(names))):
+                try:
+                    adb("forward", "--remove", "tcp:9222")
+                    adb("forward", "tcp:9222", "localabstract:" + name)
+                    pages = json.load(urllib.request.urlopen("http://127.0.0.1:9222/json", timeout=5))
+                except Exception:
+                    continue
+                p = next((p for p in pages if p.get("type") == "page" and url_part in p.get("url", "")
+                          and p.get("webSocketDebuggerUrl")), None)
+                if p:
+                    return p
+            return None
         page = wait_for(find, 120, 2)          # 模擬器剛開機時 WebView 偵錯通道可能較慢出現
         if not page:
             raise RuntimeError("找不到 WebView 頁面 " + url_part)
@@ -426,14 +433,14 @@ def remote_cases(pg):
     shot("14_summary")
     key("KEYCODE_BACK", 1, 1)
     # ⑧ 預先下載下一支（播放暫存開著時）
-    cache_on = player_log(r"player buffer .*cache=true") or "cache=true" in (INFO.get("cache_line") or "")
-    INFO["cache"] = (player_log(r"cache (on|off)") or [""])[-1]
-    if cache_on or player_log(r"cache on"):
+    ci = json.loads(pg.ev("window.YTmateTV && YTmateTV.cacheInfo ? YTmateTV.cacheInfo() : '{}'") or "{}")
+    INFO["cache"] = ci
+    if ci.get("cap", 0) > 0:
         pf = wait_for(lambda: player_log(r"prefetch item=1 .*done"), 30, 1)
         files = [x for x in srvlog()[n_srv:] if x["kind"] == "req" and x["path"].startswith("/api/files/video/") and x.get("range")]
         check("[預先下載] 目前這支緩衝夠了 → 在背景先下載下一支的開頭", pf and files, (player_log("prefetch")[-2:], [f["path"] + " " + f["range"] for f in files][-3:]))
     else:
-        check("[預先下載] 模擬器空間不足，播放暫存自動關閉（不佔空間）", player_log(r"cache off"), INFO["cache"])
+        check("[預先下載] 模擬器空間不足，播放暫存自動關閉（不佔空間）", ci.get("free", 0) < 100 * 1024 * 1024 * 10, ci)
     # ⑨ 「5 秒後播放下一支」：返回＝取消
     adb("logcat", "-c")
     ack_of(inject("control", {"action": "seek_abs", "value": 31}))
@@ -737,7 +744,14 @@ def main():
     check("重新開啟 App → 畫質設定（480p）仍記得（頻道請求帶 q=low）", chq and chq[-1].get("q") == "low", chq[-1:] if chq else "")
 
     # ⑩ 2026-10-17（v1.1）：手機遙控、電視首頁改版
-    pg.connect("/tv")
+    for attempt in range(3):              # App 關掉再開後，偵錯通道偶爾要等一下才連得上
+        try:
+            pg.ws = None
+            pg.connect("/tv")
+            break
+        except Exception as e:
+            print("重新連線頁面失敗，再試一次：", e, flush=True)
+            time.sleep(5)
     remote_cases(pg)
     home_rows_cases(pg)
 
