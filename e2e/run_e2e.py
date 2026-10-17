@@ -567,11 +567,11 @@ def queue_cases(pg):
     top = wait_for(lambda: "PlayerActivity" in resumed(), 20, 1)
     tf = [x for x in srvlog()[n0:] if x["kind"] == "queue_take_from"]
     check("[待播清單] 首頁短按確認 → 從這支開始播（取走這支和後面的）", top and tf and tf[-1]["taken"] == ["h264", "music"], tf[-1:])
-    for _ in range(3):
-        key("KEYCODE_BACK", 1, 1.5)
-        if "MainActivity" in resumed():
-            break
-    wait_for(lambda: "MainActivity" in resumed(), 10, 1)
+    # 用手機的「停止」離開播放器（從看到哪裡接著播會遇到「5 秒後播放」，返回鍵只會取消倒數）
+    ack_of(inject("control", {"action": "stop"}))
+    back = wait_for(lambda: "MainActivity" in resumed(), 15, 1)
+    check("[待播清單] 停止後回到首頁", back, resumed())
+    time.sleep(1.5)
     # 清空：按兩下
     post("/test/queue", {"video_ids": ["av1", "music"]})
     pg.ev("loadHome()")
