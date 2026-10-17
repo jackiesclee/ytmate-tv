@@ -285,5 +285,39 @@ object Remote {
         }
     }
 
+    /** 這台電視的待播清單（播放器的「接下來播放」用）：[(video_id, 標題)]，回主執行緒。 */
+    fun queueGet(done: (List<Pair<String, String>>) -> Unit) {
+        thread(isDaemon = true, name = "remote-queue") {
+            val out = ArrayList<Pair<String, String>>()
+            try {
+                val (code, txt) = http("GET", "/api/remote/me/queue", null, 15_000)
+                if (code == 200) {
+                    val arr = JSONObject(txt).optJSONArray("queue") ?: JSONArray()
+                    for (i in 0 until arr.length()) {
+                        val o = arr.getJSONObject(i)
+                        out.add(o.optString("video_id") to o.optString("title").ifEmpty { o.optString("video_id") })
+                    }
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "queue get failed: $e")
+            }
+            main.post { done(out) }
+        }
+    }
+
+    /** 從這台電視的待播清單刪掉一支（播放器裡長按確認）。 */
+    fun queueRemove(vid: String, done: (Boolean) -> Unit) {
+        thread(isDaemon = true, name = "remote-queue") {
+            var ok = false
+            try {
+                val (code, _) = http("POST", "/api/remote/me/queue", JSONObject().put("remove", vid), 15_000)
+                ok = code == 200
+            } catch (e: Exception) {
+                Log.w(TAG, "queue remove failed: $e")
+            }
+            main.post { done(ok) }
+        }
+    }
+
     private fun sleep(ms: Long) { try { Thread.sleep(ms) } catch (_: InterruptedException) {} }
 }

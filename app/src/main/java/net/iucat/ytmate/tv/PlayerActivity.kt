@@ -24,6 +24,7 @@ import android.view.View
 import android.webkit.CookieManager
 import android.widget.FrameLayout
 import android.widget.ImageView
+import android.widget.ScrollView
 import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
@@ -97,6 +98,8 @@ import kotlin.concurrent.thread
  *   - 右上角提示（新一集做好、同步到新影片）。
  *   - 播放時加速下載：緩衝往前最多 5 分鐘；播放暫存（依電視剩餘空間自動，最多 500MB，見 MediaCache）；
  *     目前這支緩衝夠了就在背景先下載下一支的開頭（約 3 分鐘），切換時秒開。
+ *   - v1.1.2：長按確認鍵＝打開右邊的「接下來播放」（這份清單接下來的影片＋待播清單）：
+ *     上下選擇、確認＝播放這支、長按確認＝刪除、返回＝關閉。短按確認還是暫停／播放（放開時才決定）。
  */
 @OptIn(UnstableApi::class)
 class PlayerActivity : Activity() {
@@ -115,6 +118,7 @@ class PlayerActivity : Activity() {
         // 目前這支要已經整支緩衝好（或往前 3 分鐘以上）、播放 15 秒以上才開始；一卡頓就停止預先下載。
         private const val PREFETCH_SEC = 90L
         private const val PREFETCH_AFTER_MS = 15_000L
+        private const val LONG_PRESS_MS = 600L           // 按住確認鍵超過這麼久（或收到重複按下）＝長按
         @Volatile
         var pending: String? = null      // MainActivity 傳來的播放清單 JSON（清單可能很長，不放 Intent）
         @Volatile
@@ -179,6 +183,18 @@ class PlayerActivity : Activity() {
     private lateinit var noticeImg: ImageView
     private lateinit var noticeText: TextView
     private var countdownShown = false
+    // 「接下來播放」面板（長按確認鍵打開）
+    private data class UpEntry(val kind: String, val vid: String, val title: String)   // kind: list（這份清單）／queue（待播清單）
+    private lateinit var upPanel: LinearLayout
+    private lateinit var upScroll: ScrollView
+    private lateinit var upList: LinearLayout
+    private val upEntries = ArrayList<UpEntry>()
+    private val upRows = ArrayList<TextView>()
+    private var upSel = 0
+    private var upShown = false
+    private var upQueueLoaded = false
+    private var okDownAt = 0L
+    private var okLongDone = false
     private var cancelledIdx = -1
     private var menuOpened = false
     private var waitingQueue = false
@@ -766,6 +782,22 @@ class PlayerActivity : Activity() {
         noticeBox.addView(noticeImg, LinearLayout.LayoutParams(-1, dp(171f)).apply { bottomMargin = dp(10f) })
         noticeBox.addView(noticeText)
         overlay.addView(noticeBox, FrameLayout.LayoutParams(dp(330f), -2, Gravity.TOP or Gravity.END).apply { rightMargin = dp(32f); topMargin = dp(28f) })
+
+        // 「接下來播放」面板（長按確認鍵打開；疊在控制列上面）
+        upPanel = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(22f), dp(24f), dp(22f), dp(20f))
+            background = GradientDrawable(GradientDrawable.Orientation.RIGHT_LEFT, intArrayOf(Color.parseColor("#F20B0B14"), Color.parseColor("#E00B0B14")))
+            visibility = View.GONE
+        }
+        upPanel.addView(TextView(this).apply { setTextColor(Color.WHITE); textSize = 20f; typeface = Typeface.DEFAULT_BOLD; text = "⏭ 接下來播放" })
+        upPanel.addView(TextView(this).apply { setTextColor(Color.parseColor("#A3A3B8")); textSize = 12.5f; text = "上下選擇　確認＝播放這支　長按確認＝刪除　返回＝關閉" },
+            LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(4f); bottomMargin = dp(12f) })
+        upScroll = ScrollView(this).apply { isVerticalScrollBarEnabled = false; isFocusable = false }
+        upList = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        upScroll.addView(upList, FrameLayout.LayoutParams(-1, -2))
+        upPanel.addView(upScroll, LinearLayout.LayoutParams(-1, 0, 1f))
+        root.addView(upPanel, FrameLayout.LayoutParams(dp(430f), -1, Gravity.END))
         setContentView(root)
     }
 
@@ -1187,10 +1219,12 @@ class PlayerActivity : Activity() {
         lastKeyAt = SystemClock.uptimeMillis()
         if (event.action == KeyEvent.ACTION_DOWN) {
             if (event.repeatCount == 0) Log.i(TAG, "key ${KeyEvent.keyCodeToString(code)} shown=$controllerShown focus=${focusName()}")
-            // 按住不放：確認鍵只算一次；左右鍵繼續快轉（就算控制列中途出現也一樣）
+            if (upShown) return upKey(event)
+            // 按住不放：左右鍵繼續快轉（就算控制列中途出現也一樣）；確認鍵按住＝長按（打開「接下來播放」）
             if (event.repeatCount > 0 && code == consumedKey) {
                 if (code == KeyEvent.KEYCODE_DPAD_RIGHT) seekBy(+seekStep(event.repeatCount))
                 if (code == KeyEvent.KEYCODE_DPAD_LEFT) seekBy(-seekStep(event.repeatCount))
+                if (isOk(code) && !okLongDone) { okLongDone = true; openUpNext() }
                 return true
             }
             // 「N 秒後播放下一支」顯示中：確認＝立刻播下一支（返回＝取消，在放開時處理）
@@ -1218,7 +1252,9 @@ class PlayerActivity : Activity() {
             if (!controllerShown) {
                 when (code) {
                     KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER, KeyEvent.KEYCODE_NUMPAD_ENTER -> {
-                        if (event.repeatCount == 0) togglePlay(); consumedKey = code; return true
+                        // 短按＝暫停／播放、長按＝「接下來播放」：放開時才決定（見下面 ACTION_UP）
+                        if (event.repeatCount == 0) { okDownAt = SystemClock.uptimeMillis(); okLongDone = false }
+                        consumedKey = code; return true
                     }
                     KeyEvent.KEYCODE_DPAD_RIGHT -> { seekBy(+seekStep(event.repeatCount)); consumedKey = code; return true }
                     KeyEvent.KEYCODE_DPAD_LEFT -> { seekBy(-seekStep(event.repeatCount)); consumedKey = code; return true }
@@ -1227,8 +1263,15 @@ class PlayerActivity : Activity() {
             }
             consumedKey = 0
         }
+        if (upShown) return upKey(event)
         if (event.action == KeyEvent.ACTION_UP && code == consumedKey && code != KeyEvent.KEYCODE_BACK) {
             consumedKey = 0
+            if (isOk(code) && okDownAt > 0) {
+                val held = SystemClock.uptimeMillis() - okDownAt
+                okDownAt = 0L
+                if (!okLongDone) { if (held >= LONG_PRESS_MS) openUpNext() else togglePlay() }
+                return true
+            }
             if ((code == KeyEvent.KEYCODE_DPAD_LEFT || code == KeyEvent.KEYCODE_DPAD_RIGHT) && seekShown) {
                 seekReleasedAt = SystemClock.uptimeMillis()          // 放開了：恢復正常播放後收起時間軸
                 ui.removeCallbacks(seekTick); ui.postDelayed(seekTick, 250)
@@ -1246,6 +1289,187 @@ class PlayerActivity : Activity() {
             return true
         }
         return view.dispatchKeyEvent(event) || super.dispatchKeyEvent(event)
+    }
+
+    private fun isOk(code: Int) = code == KeyEvent.KEYCODE_DPAD_CENTER || code == KeyEvent.KEYCODE_ENTER || code == KeyEvent.KEYCODE_NUMPAD_ENTER
+
+    // ══「接下來播放」：這份清單接下來的影片＋待播清單；確認＝播放、長按確認＝刪除 ══
+    private fun openUpNext() {
+        view.hideController()
+        hideCountdown()
+        upShown = true
+        upOpenedAt = SystemClock.uptimeMillis()
+        upQueueLoaded = false
+        upSel = 0
+        rebuildUpEntries(emptyList())
+        upPanel.visibility = View.VISIBLE
+        Log.i(TAG, "upnext open list=${upEntries.size}")
+        Remote.queueGet { q ->
+            if (!upShown) return@queueGet
+            upQueueLoaded = true
+            rebuildUpEntries(q)
+            Log.i(TAG, "upnext queue n=${q.size}")
+        }
+    }
+
+    private fun closeUpNext() {
+        upShown = false
+        upPanel.visibility = View.GONE
+        okDownAt = 0L
+        Log.i(TAG, "upnext close")
+    }
+
+    private fun rebuildUpEntries(queue: List<Pair<String, String>>?) {
+        val keepQueue = if (queue == null) upEntries.filter { e -> e.kind == "queue" } else queue.map { (v, t) -> UpEntry("queue", v, t) }
+        upEntries.clear()
+        val cur = player.currentMediaItemIndex
+        for (j in (cur + 1) until items.size) upEntries.add(UpEntry("list", j.toString(), items[j].title))
+        upEntries.addAll(keepQueue)
+        upSel = upSel.coerceIn(0, (upEntries.size - 1).coerceAtLeast(0))
+        renderUpNext()
+    }
+
+    private fun renderUpNext() {
+        upList.removeAllViews()
+        upRows.clear()
+        fun header(t: String) = upList.addView(TextView(this).apply {
+            setTextColor(Color.parseColor("#F9A8D4")); textSize = 13f; typeface = Typeface.DEFAULT_BOLD; text = t
+            setPadding(dp(4f), dp(10f), dp(4f), dp(6f))
+        })
+        val nList = upEntries.count { e -> e.kind == "list" }
+        val nQueue = upEntries.size - nList
+        header("這份清單接下來（$nList）")
+        if (nList == 0) upList.addView(TextView(this).apply { setTextColor(Color.parseColor("#8B8BA0")); textSize = 14f; text = "（這是最後一支）"; setPadding(dp(4f), 0, 0, dp(6f)) })
+        var headerQueueDone = false
+        for ((k, e) in upEntries.withIndex()) {
+            if (e.kind == "queue" && !headerQueueDone) { header("📋 待播清單（播完後接著播，$nQueue）"); headerQueueDone = true }
+            val row = TextView(this).apply {
+                textSize = 15f; maxLines = 2
+                setPadding(dp(14f), dp(10f), dp(14f), dp(10f))
+                text = e.title
+            }
+            upList.addView(row, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(6f) })
+            upRows.add(row)
+            styleUpRow(k)
+        }
+        if (!headerQueueDone) {
+            header("📋 待播清單（播完後接著播）")
+            upList.addView(TextView(this).apply { setTextColor(Color.parseColor("#8B8BA0")); textSize = 14f
+                text = if (upQueueLoaded) "（空的；可以在手機遙控頁加）" else "（載入中…）"; setPadding(dp(4f), 0, 0, dp(6f)) })
+        }
+        upScroll.post { scrollToUpSel() }
+    }
+
+    private fun styleUpRow(k: Int) {
+        val row = upRows.getOrNull(k) ?: return
+        val sel = k == upSel
+        row.setTextColor(if (sel) Color.parseColor("#111111") else Color.WHITE)
+        row.typeface = if (sel) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
+        row.background = roundBg(if (sel) "#FFFFFF" else "#26FFFFFF", 10f)
+    }
+
+    private fun scrollToUpSel() {
+        val row = upRows.getOrNull(upSel) ?: return
+        val y = row.top - dp(40f)
+        upScroll.smoothScrollTo(0, y.coerceAtLeast(0))
+    }
+
+    private fun moveUpSel(d: Int) {
+        if (upEntries.isEmpty()) return
+        val old = upSel
+        upSel = (upSel + d).coerceIn(0, upEntries.size - 1)
+        if (old != upSel) { styleUpRow(old); styleUpRow(upSel); scrollToUpSel() }
+    }
+
+    /** 面板開著時的按鍵：上下選擇、確認（短按播放／長按刪除）、返回或選單鍵關閉；其他鍵不做事。 */
+    private fun upKey(event: KeyEvent): Boolean {
+        val code = event.keyCode
+        if (event.action == KeyEvent.ACTION_DOWN) {
+            when {
+                code == KeyEvent.KEYCODE_DPAD_UP -> moveUpSel(-1)
+                code == KeyEvent.KEYCODE_DPAD_DOWN -> moveUpSel(+1)
+                isOk(code) -> {
+                    if (event.repeatCount == 0) {
+                        // 打開面板的那次長按還沒放開：不算新的按鍵
+                        if (okDownAt == 0L || consumedKey != code) { okDownAt = SystemClock.uptimeMillis(); okLongDone = false; consumedKey = code }
+                    } else if (okDownAt > 0 && !okLongDone && consumedKey == code && SystemClock.uptimeMillis() - okDownAt < 30_000) {
+                        okLongDone = true; deleteUpSel()
+                    }
+                }
+            }
+            return true
+        }
+        if (event.action == KeyEvent.ACTION_UP) {
+            when {
+                code == KeyEvent.KEYCODE_BACK || code == KeyEvent.KEYCODE_MENU -> closeUpNext()
+                isOk(code) -> {
+                    val pressedHere = okDownAt > 0 && consumedKey == code
+                    val held = SystemClock.uptimeMillis() - okDownAt
+                    val wasLong = okLongDone
+                    okDownAt = 0L; okLongDone = false; consumedKey = 0
+                    if (pressedHere && !wasLong && openedAt > 0 && SystemClock.uptimeMillis() - openedAt > 300) {
+                        if (held >= LONG_PRESS_MS) deleteUpSel() else playUpSel()
+                    }
+                }
+            }
+            return true
+        }
+        return true
+    }
+    private val openedAt: Long get() = if (upShown) upOpenedAt else 0L
+    private var upOpenedAt = 0L
+
+    private fun playUpSel() {
+        val e = upEntries.getOrNull(upSel) ?: return
+        closeUpNext()
+        if (e.kind == "list") {
+            val j = e.vid.toIntOrNull() ?: return
+            if (j in items.indices) { Log.i(TAG, "upnext play list idx=$j"); player.seekTo(j, 0L); player.play() }
+        } else {
+            // 待播清單的影片：交給電視頁面跟伺服器拿播放資料（取走這支和後面的），同一個播放器換清單
+            Log.i(TAG, "upnext play queue vid=${e.vid}")
+            val m = Remote.mainActivity
+            if (m == null) { Toast.makeText(this, "電視上的 YTmate 頁面沒有開著", Toast.LENGTH_SHORT).show(); return }
+            m.runJs("window.tvPlayQueueVid ? (window.tvPlayQueueVid(${JSONObject.quote(e.vid)}), 'ok') : 'old'") { r ->
+                if (r == null || !r.contains("ok")) Toast.makeText(this, "電視頁面太舊，請更新伺服器", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    private fun deleteUpSel() {
+        val e = upEntries.getOrNull(upSel) ?: return
+        if (e.kind == "list") {
+            val j = e.vid.toIntOrNull() ?: return
+            if (j <= player.currentMediaItemIndex || j !in items.indices) return
+            removeItemAt(j)
+            Log.i(TAG, "upnext delete list idx=$j title=${e.title}")
+            showOsd("🗑 已從這份清單刪除：${e.title}")
+            rebuildUpEntries(null)
+        } else {
+            Log.i(TAG, "upnext delete queue vid=${e.vid}")
+            Remote.queueRemove(e.vid) { ok ->
+                if (ok) {
+                    upEntries.removeAll { x -> x.kind == "queue" && x.vid == e.vid }
+                    upSel = upSel.coerceIn(0, (upEntries.size - 1).coerceAtLeast(0))
+                    if (upShown) renderUpNext()
+                    showOsd("🗑 已從待播清單刪除：${e.title}")
+                } else showOsd("刪除失敗，請確認網路")
+            }
+        }
+    }
+
+    /** 從目前這份清單拿掉第 j 支（只能拿掉還沒播到的）。 */
+    private fun removeItemAt(j: Int) {
+        player.removeMediaItem(j)
+        items.removeAt(j)
+        srcIdx = srcIdx.filterIndexed { i, _ -> i != j }.toIntArray()
+        netRetry = netRetry.filterIndexed { i, _ -> i != j }.toIntArray()
+        val shift = { set: HashSet<Int> -> val n = set.filter { i -> i != j }.map { i -> if (i > j) i - 1 else i }; set.clear(); set.addAll(n) }
+        shift(noted); shift(resumed)
+        if (prefetchedIdx == j) { cancelPrefetch(); prefetchedIdx = -1 } else if (prefetchedIdx > j) prefetchedIdx--
+        if (cancelledIdx > j) cancelledIdx--
+        if (curIdx > j) curIdx--
+        Remote.reportNow()
     }
 
     /** 按住左右鍵不放會加速：前 3 下 10 秒、之後 30 秒、再久 60 秒（長影片找段落比較快）。 */

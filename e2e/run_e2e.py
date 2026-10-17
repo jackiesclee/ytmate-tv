@@ -538,6 +538,90 @@ def home_rows_cases(pg):
     key("KEYCODE_MENU", 1, 1)
 
 
+def mock_queue():
+    """測試伺服器目前的待播清單（看 /test/log 最後的狀態太麻煩，直接讀）。"""
+    return post("/test/queue_get")["queue"]
+
+
+def queue_cases(pg):
+    """2026-10-17 使用者需求：電視上也能刪待播清單的影片，用「長按確認鍵」刪除。
+    首頁「📋 待播清單」一排：短按＝從這支開始播、長按＝刪除、最後一張「清空」按兩下；
+    播放中長按確認＝「接下來播放」：上下選、確認＝播放、長按＝刪除、返回＝關閉；短按確認還是暫停／播放。"""
+    post("/test/queue", {"video_ids": ["h264", "av1", "music"]})
+    pg.ev("loadHome()")
+    st = wait_for(lambda: pg.state() if "queue" in (pg.state().get("rows") or []) else None, 20, 1)
+    n = pg.ev("document.querySelectorAll('#qrow .card[data-act=\"rowcard\"]').length")
+    check("[待播清單] 首頁有「📋 待播清單」一排（3 支＋清空）", st and n == 3 and pg.ev("!!document.querySelector('#qrow .qclear')"), (n, st))
+    pg.ev("setFocus(document.querySelector('#qrow .card[data-k=\"1\"]'))")
+    shot("21_queue_row")
+    sh("input", "keyevent", "--longpress", "KEYCODE_DPAD_CENTER")
+    ok = wait_for(lambda: mock_queue() == ["h264", "music"], 8, 0.5)
+    time.sleep(1)
+    n2 = pg.ev("document.querySelectorAll('#qrow .card[data-act=\"rowcard\"]').length")
+    check("[待播清單] 首頁長按確認 → 刪除這支（伺服器與畫面都少一支，焦點留在這排）", ok and n2 == 2 and pg.state().get("focusRow") == "queue", (mock_queue(), n2, pg.state().get("focusVid")))
+    check("[待播清單] 長按不會當成「播放」", "PlayerActivity" not in resumed())
+    # 短按 → 從這支開始播
+    pg.ev("setFocus(document.querySelector('#qrow .card[data-k=\"0\"]'))")
+    n0 = len(srvlog())
+    key("KEYCODE_DPAD_CENTER", 1, 2)
+    top = wait_for(lambda: "PlayerActivity" in resumed(), 20, 1)
+    tf = [x for x in srvlog()[n0:] if x["kind"] == "queue_take_from"]
+    check("[待播清單] 首頁短按確認 → 從這支開始播（取走這支和後面的）", top and tf and tf[-1]["taken"] == ["h264", "music"], tf[-1:])
+    for _ in range(3):
+        key("KEYCODE_BACK", 1, 1.5)
+        if "MainActivity" in resumed():
+            break
+    wait_for(lambda: "MainActivity" in resumed(), 10, 1)
+    # 清空：按兩下
+    post("/test/queue", {"video_ids": ["av1", "music"]})
+    pg.ev("loadHome()")
+    wait_for(lambda: pg.ev("!!document.querySelector('#qrow .qclear')"), 15, 1)
+    pg.ev("setFocus(document.querySelector('#qrow .qclear'))")
+    key("KEYCODE_DPAD_CENTER", 1, 1)
+    check("[待播清單] 清空按一下 → 先提醒、不會清掉", mock_queue() == ["av1", "music"], mock_queue())
+    key("KEYCODE_DPAD_CENTER", 1, 1.5)
+    check("[待播清單] 再按一下 → 清空，這排消失", mock_queue() == [] and not pg.ev("!!document.querySelector('#qrow .card')"), mock_queue())
+
+    # 播放中：長按確認＝「接下來播放」
+    post("/test/queue", {"video_ids": ["av1_unknown"]})
+    adb("logcat", "-c")
+    a = ack_of(inject("play", {"video_ids": ["h264", "av1", "music"], "start_pos": 2}))
+    wait_for(lambda: player_log(r"playing=true"), 20, 0.5)
+    wait_for(ctl_hidden_now, 10, 0.5)
+    sh("input", "keyevent", "--longpress", "KEYCODE_DPAD_CENTER")
+    op = wait_for(lambda: player_log(r"upnext open list=2"), 6, 0.5)
+    qn = wait_for(lambda: player_log(r"upnext queue n=1"), 8, 0.5)
+    check("[接下來播放] 播放中長按確認 → 打開「接下來播放」（這份清單 2 支＋待播清單 1 支）", op and qn, player_log("upnext")[-3:])
+    check("[接下來播放] 長按不會暫停", not player_log(r"playing=false"), player_log("playing=")[-2:])
+    shot("22_upnext")
+    key("KEYCODE_DPAD_DOWN", 1, 0.8)                      # 選第 2 支（純音樂）
+    sh("input", "keyevent", "--longpress", "KEYCODE_DPAD_CENTER")
+    dl = wait_for(lambda: player_log(r"upnext delete list idx=2"), 6, 0.5)
+    check("[接下來播放] 長按確認 → 從這份清單刪除", dl, player_log("upnext")[-2:])
+    key("KEYCODE_DPAD_DOWN", 1, 0.8)                      # 選待播清單那支
+    sh("input", "keyevent", "--longpress", "KEYCODE_DPAD_CENTER")
+    dq = wait_for(lambda: player_log(r"upnext delete queue vid=av1_unknown"), 6, 0.5)
+    gone = wait_for(lambda: mock_queue() == [], 8, 0.5)
+    check("[接下來播放] 長按確認 → 從待播清單刪除（伺服器也刪了）", dq and gone, (player_log("upnext")[-2:], mock_queue()))
+    shot("23_upnext_deleted")
+    key("KEYCODE_DPAD_UP", 1, 0.5)                        # 回到第 1 支（AV1）
+    key("KEYCODE_DPAD_CENTER", 1, 1.5)
+    pl = wait_for(lambda: player_log(r"upnext play list idx=1"), 6, 0.5)
+    tr = wait_for(lambda: player_log(r"transition item=1"), 8, 0.5)
+    check("[接下來播放] 短按確認 → 播放選的那支、面板關閉", pl and tr and player_log(r"upnext close"), player_log("upnext|transition")[-3:])
+    sh("input", "keyevent", "--longpress", "KEYCODE_DPAD_CENTER")
+    wait_for(lambda: player_log(r"upnext open"), 6, 0.5)
+    n0 = len(logcat().splitlines())
+    key("KEYCODE_BACK", 1, 1)
+    check("[接下來播放] 返回鍵關閉面板（不會離開播放器）", any("upnext close" in l for l in logcat().splitlines()[n0:]) and "PlayerActivity" in resumed())
+    wait_for(ctl_hidden_now, 10, 0.5)
+    n0 = len(logcat().splitlines())
+    key("KEYCODE_DPAD_CENTER", 1, 1.5)
+    check("[接下來播放] 短按確認還是暫停", any("playing=false" in l for l in logcat().splitlines()[n0:]), [l for l in logcat().splitlines()[n0:] if "playing=" in l][-2:])
+    ack_of(inject("control", {"action": "stop"}))
+    wait_for(lambda: "MainActivity" in resumed(), 15, 1)
+
+
 def main():
     pg = Page()
     INFO["device"] = sh("getprop", "ro.product.model").strip() + " / Android " + sh("getprop", "ro.build.version.release").strip()
@@ -760,6 +844,7 @@ def main():
             time.sleep(5)
     remote_cases(pg)
     home_rows_cases(pg)
+    queue_cases(pg)
 
 
 try:

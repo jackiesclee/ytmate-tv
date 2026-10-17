@@ -125,6 +125,7 @@ def home():
         out.append({**c, "cover": None, "thumbs": [f"/api/files/thumb/{THUMBS[(i + k) % 4]}" for k in range(4 if i % 3 else 1)],
                     "song_count": len(SONGS) if c["id"] == "fmt" else 3, "playable": 3})
     resp = {"channels": out, "device_id": "dvtest"}
+    by = {x["video_id"]: x for x in SONGS}
     if ROWS_ON[0]:
         card = lambda vid, t, **kw: {"video_id": vid, "title": t, "duration": 40, "thumb": f"/api/files/thumb/{THUMBS[len(vid) % 4]}",
                                      "channel_name": "🎬 格式測試", "resume": 0, "watched": False, "is_new": False, "description": "", **kw}
@@ -134,6 +135,8 @@ def home():
             "recent": [card("av1_unknown", "AV1（不知道格式）", is_new=True), card("music", "純音樂")],
             "shows": [card("h264", "最新節目：H.264"), card("av1", "最新節目：AV1")],
         }
+    resp.setdefault("rows", {})["queue"] = [{"video_id": v, "title": (by.get(v) or {}).get("title", v), "duration": 40,
+                                             "thumb": f"/api/files/thumb/{THUMBS[len(v) % 4]}", "channel_name": "🎬 格式測試"} for v in QUEUE]
     return jsonify(resp)
 
 
@@ -253,6 +256,32 @@ def remote_ack():
     return jsonify({"ok": True})
 
 
+@app.route("/api/remote/<did>/queue", methods=["GET", "POST", "DELETE"])
+def remote_queue(did):
+    """電視（me）或手機管理待播清單：remove、take_from、清空。"""
+    if not logged_in():
+        return jsonify({"error": "需要登入"}), 401
+    by = {x["video_id"]: x for x in SONGS}
+    items = lambda: [{"video_id": v, "title": (by.get(v) or {}).get("title", v), "duration": 40, "thumb": None} for v in QUEUE]
+    if request.method == "DELETE":
+        QUEUE.clear(); log("queue_clear")
+        return jsonify({"queue": []})
+    if request.method == "POST":
+        b = request.get_json(silent=True) or {}
+        if b.get("remove"):
+            if b["remove"] in QUEUE:
+                QUEUE.remove(b["remove"])
+            log("queue_remove", vid=b["remove"])
+        if b.get("take_from"):
+            v = b["take_from"]
+            taken = []
+            if v in QUEUE:
+                i = QUEUE.index(v); taken = QUEUE[i:]; del QUEUE[i:]
+            log("queue_take_from", vid=v, taken=taken)
+            return jsonify({"taken": taken, "queue": items()})
+    return jsonify({"queue": items()})
+
+
 @app.route("/api/remote/queue/take", methods=["POST"])
 def remote_queue_take():
     if not logged_in():
@@ -329,6 +358,11 @@ def t_remote():
 def t_queue():
     QUEUE[:] = (request.get_json(silent=True) or {}).get("video_ids") or []
     return jsonify({"queue": QUEUE})
+
+
+@app.route("/test/queue_get", methods=["POST"])
+def t_queue_get():
+    return jsonify({"queue": list(QUEUE)})
 
 
 @app.route("/test/rows", methods=["POST"])
