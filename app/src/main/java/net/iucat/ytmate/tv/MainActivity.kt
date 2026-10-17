@@ -99,6 +99,8 @@ class MainActivity : Activity() {
 
             override fun onPageFinished(view: WebView, url: String) {
                 CookieManager.getInstance().flush()
+                // 保險：頁面有 tvOkKey 就由 App 判斷確認鍵（跟 wantOkKeys 同一件事，避免時間差漏掉）
+                view.evaluateJavascript("window.tvOkKey ? '1' : '0'") { r -> if (r != null && r.contains("1")) pageOkKeys = true }
             }
         }
         web.webChromeClient = WebChromeClient()
@@ -279,7 +281,7 @@ class MainActivity : Activity() {
         /** 頁面查過了：沒有待播清單 → 播放器回到頻道頁。 */
         /** v1.1.2：頁面要 App 幫忙判斷確認鍵短按／長按（結果用 window.tvOkKey('short'|'long') 告訴頁面） */
         @JavascriptInterface
-        fun wantOkKeys(on: Boolean) { pageOkKeys = on }
+        fun wantOkKeys(on: Boolean) { runOnUiThread { pageOkKeys = on; Log.i("YTmateTV", "page ok keys=$on") } }
 
         @JavascriptInterface
         fun queueEmpty() { runOnUiThread { PlayerActivity.onQueueEmpty() } }

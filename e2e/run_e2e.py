@@ -580,7 +580,9 @@ def queue_cases(pg):
     key("KEYCODE_DPAD_CENTER", 1, 1)
     check("[待播清單] 清空按一下 → 先提醒、不會清掉", mock_queue() == ["av1", "music"], mock_queue())
     key("KEYCODE_DPAD_CENTER", 1, 1.5)
-    check("[待播清單] 再按一下 → 清空，這排消失", mock_queue() == [] and not pg.ev("!!document.querySelector('#qrow .card')"), mock_queue())
+    dbg = pg.ev("JSON.stringify({ld: $('loading').style.display, f: S.focusEl && S.focusEl.className, okDown: !!S.okDown, saver: isOn('saver'), player: isOn('player'), settings: isOn('settings'), view: S.view})")
+    check("[待播清單] 再按一下 → 清空，這排消失", mock_queue() == [] and not pg.ev("!!document.querySelector('#qrow .card')"),
+          (mock_queue(), dbg, [l for l in logcat().splitlines() if "page ok" in l][-4:]))
 
     # 長按加入（v1.1.2）：一般影片卡片長按＝加入待播清單、頻道卡片長按＝整個頻道加入、已在清單的不重複
     pg.ev("loadHome()")
@@ -609,15 +611,18 @@ def queue_cases(pg):
 
     # 播放中：長按確認＝「接下來播放」
     post("/test/queue", {"video_ids": ["av1_unknown"]})
+    with open(os.path.join(args.out, f"{args.label}_queue_home_logcat.txt"), "w", encoding="utf-8") as f:
+        f.write(logcat())
     adb("logcat", "-c")
     a = ack_of(inject("play", {"video_ids": ["h264", "av1", "music"], "start_pos": 2}))
     wait_for(lambda: player_log(r"playing=true"), 20, 0.5)
     wait_for(ctl_hidden_now, 10, 0.5)
+    np0 = len(player_log(r"playing=false"))
     sh("input", "keyevent", "--longpress", "KEYCODE_DPAD_CENTER")
     op = wait_for(lambda: player_log(r"upnext open list=2"), 6, 0.5)
     qn = wait_for(lambda: player_log(r"upnext queue n=1"), 8, 0.5)
     check("[接下來播放] 播放中長按確認 → 打開「接下來播放」（這份清單 2 支＋待播清單 1 支）", op and qn, player_log("upnext")[-3:])
-    check("[接下來播放] 長按不會暫停", not player_log(r"playing=false"), player_log("playing=")[-2:])
+    check("[接下來播放] 長按不會暫停", len(player_log(r"playing=false")) == np0, player_log("playing=")[-2:])
     shot("22_upnext")
     key("KEYCODE_DPAD_DOWN", 1, 0.8)                      # 選第 2 支（純音樂）
     sh("input", "keyevent", "--longpress", "KEYCODE_DPAD_CENTER")
