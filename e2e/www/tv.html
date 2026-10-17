@@ -247,6 +247,8 @@ function scrollToEl(el) {
   var sc = $('scroller');
   if (el.getAttribute('data-top') === '1' || !closestIn(el, 'scroller')) { if (el.getAttribute('data-top') === '1') sc.scrollTop = 0; return; }
   var r = el.getBoundingClientRect(), b = sc.getBoundingClientRect(), pad = window.innerWidth * 0.012;
+  // 捲到最上面時這張就看得到（例如第一排）→ 直接捲回頂端（區塊標題也看得到）
+  if (r.bottom - b.top + sc.scrollTop + pad <= sc.clientHeight) { sc.scrollTop = 0; return; }
   if (r.top < b.top + pad) sc.scrollTop += r.top - b.top - pad;
   else if (r.bottom > b.bottom - pad) sc.scrollTop += r.bottom - b.bottom + pad;
 }

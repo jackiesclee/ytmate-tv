@@ -410,7 +410,14 @@ def remote_cases(pg):
     check("[提示] 播放中右上角顯示提示（不中斷播放）", a and a.get("ok") and any("notice shown" in l for l in logcat().splitlines()[n0:]) and rstate().get("playing") is not False, a)
     time.sleep(1.5)
     shot("13_notice")
-    # ⑥ 選單鍵 → 控制列＋中文摘要
+    # ⑥ 播放器開著時又送清單（從 2 秒開始）→ 同一個播放器換清單；先清暫存，才看得到預先下載的請求
+    pg.ev("window.YTmateTV && YTmateTV.clearCache && YTmateTV.clearCache()")
+    adb("logcat", "-c")
+    n_srv = len(srvlog())
+    a = ack_of(inject("play", {"video_ids": ["h264", "av1"], "start_pos": 2}))
+    check("[遙控] 播放器開著時又送清單 → 同一個播放器換清單（不用重開）", a and a.get("ok") and wait_for(lambda: player_log(r"playlist loaded .*replace=true"), 10, 0.5), player_log("playlist loaded")[-1:])
+    wait_for(lambda: player_log(r"playing=true"), 15, 0.5)
+    # ⑦ 選單鍵 → 控制列＋中文摘要
     wait_for(ctl_hidden_now, 10, 0.5)
     n0 = len(logcat().splitlines())
     key("KEYCODE_MENU", 1, 1.5)
@@ -418,48 +425,46 @@ def remote_cases(pg):
     check("[摘要] 選單鍵叫出控制列時，右邊顯示這支影片的中文摘要", sm and not sm[-1].rstrip().endswith("len=-1") and not sm[-1].rstrip().endswith("len=0"), sm[-1:])
     shot("14_summary")
     key("KEYCODE_BACK", 1, 1)
-    # ⑦ 預先下載下一支（播放暫存開著時）
-    cache_on = player_log(r"player buffer .*cache=true")
+    # ⑧ 預先下載下一支（播放暫存開著時）
+    cache_on = player_log(r"player buffer .*cache=true") or "cache=true" in (INFO.get("cache_line") or "")
     INFO["cache"] = (player_log(r"cache (on|off)") or [""])[-1]
-    if cache_on:
+    if cache_on or player_log(r"cache on"):
         pf = wait_for(lambda: player_log(r"prefetch item=1 .*done"), 30, 1)
-        files = [x for x in srvlog() if x["kind"] == "req" and x["path"].startswith("/api/files/video/") and x.get("range")]
-        check("[預先下載] 目前這支緩衝夠了 → 在背景先下載下一支的開頭", pf and files, (pf, [f["path"] + " " + f["range"] for f in files][-3:]))
+        files = [x for x in srvlog()[n_srv:] if x["kind"] == "req" and x["path"].startswith("/api/files/video/") and x.get("range")]
+        check("[預先下載] 目前這支緩衝夠了 → 在背景先下載下一支的開頭", pf and files, (player_log("prefetch")[-2:], [f["path"] + " " + f["range"] for f in files][-3:]))
     else:
         check("[預先下載] 模擬器空間不足，播放暫存自動關閉（不佔空間）", player_log(r"cache off"), INFO["cache"])
-    # ⑧ 「5 秒後播放下一支」：返回＝取消
+    # ⑨ 「5 秒後播放下一支」：返回＝取消
     adb("logcat", "-c")
     ack_of(inject("control", {"action": "seek_abs", "value": 31}))
     cd = wait_for(lambda: player_log(r"countdown show item=0"), 12, 0.5)
-    check("[下一支] 快播完時右下角出現「N 秒後播放：下一支」", cd, player_log("countdown|seek to")[-3:])
+    check("[下一支] 快播完時右下角出現「N 秒後播放：下一支」", cd, player_log("countdown|seek to|transition")[-3:])
     shot("15_countdown")
     key("KEYCODE_BACK", 1, 1)
     check("[下一支] 按返回 → 取消自動播放", player_log(r"countdown cancel item=0"), player_log("countdown")[-3:])
     time.sleep(9)
     check("[下一支] 取消後停在這支的結尾（沒有跳到下一支）", not player_log(r"transition item=1") and "PlayerActivity" in resumed(), player_log("transition|playing=")[-3:])
-    # ⑨ 「5 秒後播放下一支」：確認＝立刻播（手機再送一次清單 → 同一個播放器換清單）
+    # ⑩ 「5 秒後播放下一支」：確認＝立刻播
     adb("logcat", "-c")
-    cid = inject("play", {"video_ids": ["h264", "av1"], "start_pos": 31})
-    a = ack_of(cid)
-    check("[遙控] 播放器開著時又送清單 → 同一個播放器換清單（不用重開）", a and a.get("ok") and player_log(r"playlist loaded .*replace=true"), player_log("playlist loaded")[-1:])
+    a = ack_of(inject("play", {"video_ids": ["h264", "av1"], "start_pos": 31}))
     cd = wait_for(lambda: player_log(r"countdown show item=0"), 15, 0.5)
     key("KEYCODE_ENTER", 1, 1)
     nx = wait_for(lambda: player_log(r"transition item=1"), 8, 0.5)
-    check("[下一支] 按確認 → 立刻播下一支", cd and nx and player_log(r"countdown play next"), player_log("countdown|transition")[-3:])
-    # ⑩ 整份清單播完 → 接著播待播清單
+    check("[下一支] 按確認 → 立刻播下一支", a and a.get("ok") and cd and nx and player_log(r"countdown play next"), player_log("countdown|transition")[-3:])
+    # ⑪ 整份清單播完 → 接著播待播清單
     post("/test/queue", {"video_ids": ["music"]})
     adb("logcat", "-c")
     ack_of(inject("control", {"action": "seek_abs", "value": 38}))
     qt = wait_for(lambda: [x for x in srvlog() if x["kind"] == "queue_take"], 25, 1)
     ql = wait_for(lambda: player_log(r"playlist loaded items=1 .*replace=true"), 20, 1)
     check("[待播清單] 整份清單播完 → 接著播待播清單（同一個播放器）", qt and ql and "PlayerActivity" in resumed(), player_log("playlist ended|queue|playlist loaded")[-3:])
-    # ⑪ 停止
+    # ⑫ 停止
     a = ack_of(inject("control", {"action": "stop"}))
     back = wait_for(lambda: "MainActivity" in resumed(), 15, 1)
     check("[遙控] 停止 → 回到 YTmate 頁面", a and a.get("ok") and back, a)
     rs = [x for x in srvlog() if x["kind"] == "resume"]
     check("[續播] 看到哪裡會存到伺服器（看完的標成看過）", rs and any(x.get("vid") == "h264" for x in rs), rs[-3:])
-    # ⑫ 沒在播放時
+    # ⑬ 沒在播放時
     a = ack_of(inject("control", {"action": "toggle"}))
     check("[遙控] 沒在播放時按暫停 → 回報「沒有在播放」", a and not a.get("ok") and "沒有在播放" in a.get("msg", ""), a)
     a = ack_of(inject("toast", {"text": "📥 測試頻道 有 3 支新影片"}))
@@ -567,7 +572,8 @@ def main():
     sw = pg.ev("document.documentElement.scrollWidth + ',' + window.innerWidth")
     a, b = map(float, sw.split(","))
     check("沒有橫向超出畫面", a <= b + 1, sw)
-    need_scroll = pg.ev("document.getElementById('scroller').scrollHeight > window.innerHeight")
+    # 2026-10-17：首頁上方改成固定的焦點資訊區，下面的捲動區比整個畫面小 → 跟捲動區的高度比
+    need_scroll = pg.ev("(function(){var s=document.getElementById('scroller');return s.scrollHeight > s.clientHeight})()")
     check("首頁內容超過一個畫面（需要往下捲）", need_scroll)
     shot("02_home_top")
 
@@ -615,6 +621,8 @@ def main():
 
     # ⑦ 播放測試
     def play_case(idx, label, expect_kind, expect_color, expect_files, forbid_files=(), fallback=False, expect_sub=None):
+        # 2026-10-17：App 會預先下載下一支、存在播放暫存裡 → 每個案例先清掉暫存，才看得到這次實際下載了哪些檔案
+        pg.ev("window.YTmateTV && YTmateTV.clearCache && YTmateTV.clearCache()")
         adb("logcat", "-c")
         n0 = len(srvlog())
         idle(pg)
