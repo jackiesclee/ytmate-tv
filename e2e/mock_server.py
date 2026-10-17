@@ -258,7 +258,7 @@ def remote_ack():
 
 @app.route("/api/remote/<did>/queue", methods=["GET", "POST", "DELETE"])
 def remote_queue(did):
-    """電視（me）或手機管理待播清單：remove、take_from、清空。"""
+    """電視（me）或手機管理待播清單：add（v1.1.2 長按加入）、remove、take_from、清空。"""
     if not logged_in():
         return jsonify({"error": "需要登入"}), 401
     by = {x["video_id"]: x for x in SONGS}
@@ -268,6 +268,11 @@ def remote_queue(did):
         return jsonify({"queue": []})
     if request.method == "POST":
         b = request.get_json(silent=True) or {}
+        if b.get("add"):
+            added = [v for v in b["add"] if isinstance(v, str) and v not in QUEUE]
+            added = list(dict.fromkeys(added))
+            QUEUE.extend(added)
+            log("queue_add", vids=added)
         if b.get("remove"):
             if b["remove"] in QUEUE:
                 QUEUE.remove(b["remove"])

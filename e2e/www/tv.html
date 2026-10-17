@@ -86,6 +86,8 @@ body{font-size:1.2vw}
 .art .prog i{display:block;height:100%;background:#ec4899}
 .card .t{margin-top:.6vw;font-size:1.08vw;font-weight:600;line-height:1.35;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;color:#e9e9f2;min-height:2.9vw}
 .sec-title .hint{font-size:1vw;font-weight:400;color:#9a9ab0;margin-left:1.2vw}
+.art .qmark{position:absolute;right:.6vw;top:.6vw;background:rgba(236,72,153,.92);border-radius:.35vw;padding:.05vw .45vw;font-size:.85vw;font-weight:700}
+#spot .sp-hint{margin-top:.5vw;font-size:.95vw;color:#9a9ab0}
 .card.qclear .art .ph{font-size:2.6vw;padding-top:2.1vw;background:#262636;color:#fca5a5}
 .card .sub{font-size:.88vw;color:#9a9ab0;margin-top:.15vw;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .card.dim{opacity:.4}
@@ -326,11 +328,15 @@ document.addEventListener('keydown', function (e) {
   var k = keyName(e); if (!k) return;
   e.preventDefault();
   if (isOn('player')) { playerKey(k); return; }
-  // 待播清單的卡片：短按確認＝從這支開始播，長按確認＝刪除（放開時才決定是哪一種）
-  if (k === 'OK' && !isOn('settings') && S.focusEl && S.focusEl.getAttribute('data-row') === 'queue' && S.focusEl.getAttribute('data-act') === 'rowcard') {
-    if (!S.okDown) S.okDown = { t: Date.now(), el: S.focusEl, done: false };
+  // 長按確認鍵：待播清單那排＝刪除；其他影片卡片＝加入待播清單；頻道卡片＝整個頻道加入。短按照舊（放開時才決定是哪一種）
+  if (k === 'OK' && !isOn('settings') && hasLongAction(S.focusEl)) {
+    if (!S.okDown) {
+      var d0 = S.okDown = { t: Date.now(), el: S.focusEl, done: false };
+      // 保險：萬一電視沒送「放開」也沒送「重複按下」，1.2 秒後當成短按（確認鍵不會失靈）
+      d0.timer = setTimeout(function () { if (S.okDown === d0 && !d0.done) { S.okDown = null; activate(d0.el); } }, 1200);
+    }
     // 遙控器按住不放會一直送「重複按下」：收到重複按下（或按超過 0.6 秒）就算長按
-    else if (!S.okDown.done && (e.repeat || Date.now() - S.okDown.t >= LONG_MS)) { S.okDown.done = true; queueDelete(S.okDown.el); }
+    else if (!S.okDown.done && (e.repeat || Date.now() - S.okDown.t >= LONG_MS)) { S.okDown.done = true; longAction(S.okDown.el); }
     return;
   }
   if (k === 'L' || k === 'R' || k === 'U' || k === 'D') move(k);
@@ -342,9 +348,27 @@ var LONG_MS = 600;           // 按住確認鍵超過這麼久＝長按
 document.addEventListener('keyup', function (e) {
   if (keyName(e) !== 'OK' || !S.okDown) return;
   var d = S.okDown; S.okDown = null; e.preventDefault();
+  clearTimeout(d.timer);
   if (d.done) return;
-  if (Date.now() - d.t >= LONG_MS) queueDelete(d.el); else activate(d.el);
+  if (Date.now() - d.t >= LONG_MS) longAction(d.el); else activate(d.el);
 });
+// 哪些卡片有長按功能（需要知道是哪台電視：舊的網頁登入沒有裝置代號就不做）
+function hasLongAction(el) {
+  if (!el || !S.deviceId) return false;
+  var act = el.getAttribute('data-act');
+  return act === 'rowcard' || act === 'song' || act === 'channel';
+}
+function longAction(el) {
+  var act = el.getAttribute('data-act');
+  if (act === 'rowcard' && el.getAttribute('data-row') === 'queue') { queueDelete(el); return; }
+  if (act === 'rowcard') { var it = (S.rowItems[el.getAttribute('data-row')] || [])[+el.getAttribute('data-k')]; if (it) queueAdd([it.video_id], it.title); return; }
+  if (act === 'song') {
+    var s = S.songs[+el.getAttribute('data-si')]; if (!s) return;
+    if (!(s.sources && s.sources.length)) { toast('這支還沒有下載到伺服器，不能加入待播清單'); return; }
+    queueAdd([s.video_id], s.title); return;
+  }
+  if (act === 'channel') queueAddChannel(el.getAttribute('data-id'));
+}
 document.addEventListener('click', function (e) { S.lastKey = Date.now(); if (isOn('saver')) { hideSaver(); return; } var el = closestF(e.target); if (el) { setFocus(el, true); activate(el); } });
 
 // App 的「返回鍵」會呼叫這個：回傳 true＝頁面自己處理了；false＝已在首頁，交給 App（再按一次離開）
@@ -475,10 +499,14 @@ function showVideoSpot(it, row) {
   var thumb = it.thumb || it.thumb_file;
   var prog = it.resume > 0 && !it.watched && (it.duration || it.resume_dur) ? '<div class="sp-prog"><i style="width:' + Math.min(100, it.resume / (it.duration || it.resume_dur) * 100) + '%"></i></div>' : '';
   var desc = inf ? (inf.summary || '（這支影片還沒有摘要）') : (it.description || '');
+  // 操作提示（頻道頁放在同一行，免得把「全部播放」按鈕擠下去）
+  var hint = !S.deviceId ? '' : row === 'queue' ? '確認＝從這支開始播　長按確認＝從待播清單刪除' :
+    (inQueue(vid) ? '📋 已在待播清單（第 ' + (queueVids().indexOf(vid) + 1) + ' 支）' : '長按確認＝加入待播清單');
   $('spot').innerHTML = spImg(thumb) +
     '<div class="sp-text"><div class="sp-label">' + esc(label) + (it.is_new ? '・新' : '') + '</div><h1>' + esc(it.title) + '</h1>' +
-    '<div class="sp-meta">' + metaHtml(it) + chips + '</div>' + prog +
-    '<div class="sp-desc" id="spDesc">' + esc(desc) + '</div></div>';
+    '<div class="sp-meta">' + metaHtml(it) + chips + (hint && S.view === 'channel' ? '<span style="color:#9a9ab0;font-size:.95vw">' + hint + '</span>' : '') + '</div>' + prog +
+    '<div class="sp-desc" id="spDesc">' + esc(desc) + '</div>' +
+    (hint && S.view !== 'channel' ? '<div class="sp-hint">' + hint + '</div>' : '') + '</div>';
   setBg(thumb);
   if (S.view === 'channel') addChannelButtons();
   if (!inf) loadInfo(vid);
@@ -517,6 +545,7 @@ function videoCard(it, row, k) {
   return '<div class="card f' + (it.watched && row !== 'cont' ? ' seen' : '') + '" data-act="rowcard" data-row="' + row + '" data-k="' + k + '" data-vid="' + esc(it.video_id) + '">' +
     '<div class="art" style="' + grad(k) + '">' + (it.thumb ? '<img src="' + esc(it.thumb) + '" alt="">' : '<div class="ph">♪</div>') +
     (it.duration ? '<div class="dur">' + fmtDur(it.duration) + '</div>' : '') + (it.is_new ? '<div class="badge new">新</div>' : '') +
+    (row !== 'queue' && inQueue(it.video_id) ? '<div class="qmark">📋</div>' : '') +
     (pct ? '<div class="prog"><i style="width:' + pct + '%"></i></div>' : '') + '</div>' +
     '<div class="t">' + esc(it.title) + '</div><div class="sub">' + esc(it.channel_name || '') + '</div></div>';
 }
@@ -574,6 +603,7 @@ function updateQueueRow(list, focusK) {
   var keepVid = inRow ? S.focusEl.getAttribute('data-vid') : null;
   if (focusK == null && inRow) focusK = +S.focusEl.getAttribute('data-k');
   $('qrow').innerHTML = queueRowHtml();
+  refreshQueueMarks();
   if (!inRow) return;
   S.focusEl = null;
   var cards = document.querySelectorAll('#qrow .card');
@@ -597,6 +627,39 @@ function queueDelete(el) {
     updateQueueRow(j.queue, k);
     toast('🗑 已從待播清單刪除：' + it.title);
   }).catch(function (e) { toast('刪除失敗：' + e.message); });
+}
+function queueVids() { return ((S.rows && S.rows.queue) || []).map(function (x) { return x.video_id; }); }
+function inQueue(vid) { return queueVids().indexOf(vid) >= 0; }
+// 卡片右上角的 📋（已在待播清單）：清單改了就重新標
+function refreshQueueMarks() {
+  var all = document.querySelectorAll('#view .card[data-vid]');
+  for (var i = 0; i < all.length; i++) {
+    var c = all[i], art = c.querySelector('.art'); if (!art || c.getAttribute('data-row') === 'queue') continue;
+    var m = art.querySelector('.qmark'), want = inQueue(c.getAttribute('data-vid'));
+    if (want && !m) { m = document.createElement('div'); m.className = 'qmark'; m.textContent = '📋'; art.appendChild(m); }
+    else if (!want && m) art.removeChild(m);
+  }
+}
+// 長按確認＝加入待播清單（已經在清單裡就只提醒，不重複加）
+function queueAdd(vids, title) {
+  var q = queueVids(), fresh = vids.filter(function (v) { return q.indexOf(v) < 0; });
+  if (!fresh.length) { toast(vids.length === 1 ? '已經在待播清單裡（第 ' + (q.indexOf(vids[0]) + 1) + ' 支）' : '這些影片都已經在待播清單裡'); return; }
+  queueApi({ add: fresh }).then(function (j) {
+    var list = j.queue || [];
+    if (S.view === 'home') updateQueueRow(list); else S.rows.queue = list;
+    refreshQueueMarks();
+    if (S.focusEl) onFocusChanged(S.focusEl);
+    toast(fresh.length === 1 ? '➕ 已加入待播清單（第 ' + list.length + ' 支）：' + (title || '') : '➕ 已加入待播清單 ' + fresh.length + ' 支（共 ' + list.length + ' 支）', 3200);
+  }).catch(function (e) { toast('加入失敗：' + e.message); });
+}
+// 長按頻道卡片＝整個頻道（可以播的影片）加入待播清單
+function queueAddChannel(id) {
+  var qs = decQs();
+  api('/api/tv/channel/' + encodeURIComponent(id) + (qs.length ? '?' + qs.join('&') : '')).then(function (j) {
+    var vids = (j.songs || []).filter(function (x) { return x.sources && x.sources.length; }).map(function (x) { return x.video_id; });
+    if (!vids.length) { toast('這個頻道沒有可以播放的影片'); return; }
+    queueAdd(vids, j.name);
+  }).catch(function (e) { toast('加入失敗：' + e.message); });
 }
 var queueClearArmed = 0;
 function queueClear() {
@@ -659,6 +722,8 @@ function decQs() {
   return qs;
 }
 function openChannel(id, focusVid, quiet) {
+  // 順便更新待播清單（手機可能剛改過），卡片右上角的 📋 才準
+  if (S.deviceId) api('/api/remote/' + encodeURIComponent(S.deviceId) + '/queue').then(function (j) { S.rows = S.rows || {}; S.rows.queue = j.queue || []; refreshQueueMarks(); }).catch(function () {});
   if (!quiet) $('loading').style.display = 'block';
   var c = S.channels.filter(function (x) { return x.id === id; })[0] || { id: id, name: '', song_count: 0, thumbs: [] };
   var qs = decQs();
@@ -677,7 +742,8 @@ function openChannel(id, focusVid, quiet) {
       var pct = s.resume > 0 && !s.watched && (s.duration || s.resume_dur) ? Math.min(100, s.resume / (s.duration || s.resume_dur) * 100) : 0;
       return '<div class="card f' + (ok ? '' : ' dim') + (s.watched ? ' seen' : '') + '" data-act="song" data-i="' + pi + '" data-si="' + i + '" data-vid="' + esc(s.video_id) + '">' +
         '<div class="art" style="' + grad(i) + '">' + (s.thumb_file ? '<img src="' + esc(s.thumb_file) + '" alt="">' : '<div class="ph">♪</div>') +
-        (s.duration ? '<div class="dur">' + fmtDur(s.duration) + '</div>' : '') + badge + (pct ? '<div class="prog"><i style="width:' + pct + '%"></i></div>' : '') + '</div>' +
+        (s.duration ? '<div class="dur">' + fmtDur(s.duration) + '</div>' : '') + badge + (inQueue(s.video_id) ? '<div class="qmark">📋</div>' : '') +
+        (pct ? '<div class="prog"><i style="width:' + pct + '%"></i></div>' : '') + '</div>' +
         '<div class="t">' + esc(s.title || s.video_id) + '</div></div>';
     }).join('') + '</div>';
     $('view').innerHTML = h; $('scroller').scrollTop = 0;

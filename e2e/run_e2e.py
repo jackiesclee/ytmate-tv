@@ -582,6 +582,31 @@ def queue_cases(pg):
     key("KEYCODE_DPAD_CENTER", 1, 1.5)
     check("[待播清單] 再按一下 → 清空，這排消失", mock_queue() == [] and not pg.ev("!!document.querySelector('#qrow .card')"), mock_queue())
 
+    # 長按加入（v1.1.2）：一般影片卡片長按＝加入待播清單、頻道卡片長按＝整個頻道加入、已在清單的不重複
+    pg.ev("loadHome()")
+    wait_for(lambda: pg.ev("!!document.querySelector('.card[data-row=\"recent\"][data-vid=\"av1_unknown\"]')"), 15, 1)
+    pg.ev("setFocus(document.querySelector('.card[data-row=\"recent\"][data-vid=\"av1_unknown\"]'))")
+    time.sleep(0.5)
+    hint = pg.ev("(document.querySelector('#spot .sp-hint')||{}).textContent||''")
+    sh("input", "keyevent", "--longpress", "KEYCODE_DPAD_CENTER")
+    ok = wait_for(lambda: mock_queue() == ["av1_unknown"], 8, 0.5)
+    time.sleep(1.2)
+    mk = pg.ev("!!document.querySelector('.card[data-row=\"recent\"][data-vid=\"av1_unknown\"] .qmark')")
+    check("[長按加入] 影片卡片長按確認 → 加入待播清單（出現 📋 標記、首頁多一排待播清單）",
+          ok and mk and pg.ev("!!document.querySelector('#qrow .card')"), (mock_queue(), mk, hint))
+    check("[長按加入] 長按不會當成「播放」", "PlayerActivity" not in resumed())
+    check("[長按加入] 卡片上方有操作提示", "長按確認" in hint, hint)
+    shot("24_long_add")
+    pg.ev("setFocus(document.querySelector('.grid .card[data-act=\"channel\"][data-id=\"fmt\"]'))")
+    time.sleep(0.5)
+    sh("input", "keyevent", "--longpress", "KEYCODE_DPAD_CENTER")
+    ok = wait_for(lambda: len(mock_queue()) > 1, 10, 0.5)
+    q = mock_queue()
+    check("[長按加入] 頻道卡片長按確認 → 整個頻道加入（已在清單的不重複）",
+          ok and q[0] == "av1_unknown" and "h264" in q and q.count("av1_unknown") == 1 and len(q) == len(set(q)), q)
+    check("[長按加入] 頻道長按不會打開頻道", pg.state().get("view") == "home", pg.state().get("view"))
+    post("/test/queue", {"video_ids": []})
+
     # 播放中：長按確認＝「接下來播放」
     post("/test/queue", {"video_ids": ["av1_unknown"]})
     adb("logcat", "-c")
