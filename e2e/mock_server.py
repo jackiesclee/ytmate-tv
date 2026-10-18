@@ -145,7 +145,8 @@ def sources_for(s, dec, prefer_low=False):
         return [{"url": "/api/files/audio/audio.mp3", "kind": "audio", "codec": None}]
     orig = {"url": f"/api/files/video/{s['file']}", "kind": "original", "codec": s["codec"]}
     low = {"url": "/api/files/video/low.mp4", "kind": "low", "codec": "h264"}
-    aud = {"url": "/api/files/audio/audio.mp3", "kind": "audio", "codec": None}
+    # 影片的 mp3（v1.1.3「只聽聲音」用）：45 秒，比測試影片長，切換後不會馬上播完
+    aud = {"url": "/api/files/audio/listen.mp3", "kind": "audio", "codec": None}
     ok = s["codec"] is None or s["codec"] in dec
     if prefer_low and ok:                      # 使用者選了「480p 省流量」
         return [low, orig, aud]

@@ -184,6 +184,7 @@ object Remote {
             .put("version", BuildConfig.VERSION_NAME)
             .put("subs", Prefs.get(ctx, "subs").ifEmpty { "en" })
             .put("quality", Prefs.get(ctx, "quality").ifEmpty { "auto" })
+            .put("listen", Prefs.get(ctx, "listen") == "1")
         val ci = MediaCache.info(ctx)
         o.put("cache_cap", ci.optLong("cap")).put("cache_used", ci.optLong("used")).put("free_space", ci.optLong("free"))
         return o
@@ -234,6 +235,12 @@ object Remote {
                 Prefs.set(ctx, "subs", nv); true to (if (nv == "off") "字幕：關閉（下次播放套用）" else "字幕：開啟（下次播放套用）")
             }
             "quality" -> { val v = value?.toString() ?: ""; if (v == "low" || v == "auto") { Prefs.set(ctx, "quality", v); true to (if (v == "low") "畫質：480p 省流量" else "畫質：自動") } else false to "畫質設定不對" }
+            "listen" -> {
+                val v = value?.toString() ?: ""
+                val on = when (v) { "on", "1", "true" -> true; "off", "0", "false" -> false; else -> Prefs.get(ctx, "listen") != "1" }
+                Prefs.set(ctx, "listen", if (on) "1" else "0")
+                true to (if (on) "🎧 只聽聲音（下次播放套用）" else "🎬 看影片（下次播放套用）")
+            }
             "stop" -> true to "目前沒有在播放"
             else -> false to "電視目前沒有在播放"
         }

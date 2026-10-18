@@ -319,6 +319,10 @@ class MainActivity : Activity() {
         @JavascriptInterface
         fun version(): String = BuildConfig.VERSION_NAME
 
+        /** v1.1.3：這個版本的 App 支援哪些功能（頁面據此決定要不要顯示對應的設定）。 */
+        @JavascriptInterface
+        fun features(): String = "listen"
+
         @JavascriptInterface
         fun deviceName(): String {
             val n = try {

@@ -652,6 +652,66 @@ def queue_cases(pg):
     wait_for(lambda: "MainActivity" in resumed(), 15, 1)
 
 
+def listen_cases(pg):
+    """2026-10-18 使用者需求（v1.1.3）：播放影片時可以切換「🎧 只聽聲音」：改播 mp3、畫面全黑、字幕照樣可以開關；
+    整台電視一個設定（記住）；選單鍵叫出控制列，用控制列上的按鈕切換。"""
+    pg.ev("window.YTmateTV && YTmateTV.clearCache && YTmateTV.clearCache()")
+    adb("logcat", "-c")
+    n0 = len(srvlog())
+    ack_of(inject("play", {"video_ids": ["h264", "av1"], "start_pos": 1}))
+    wait_for(lambda: player_log(r"playing=true"), 20, 0.5)
+    wait_for(ctl_hidden_now, 10, 0.5)
+    a = ack_of(inject("control", {"action": "listen", "value": "on"}))
+    sw = wait_for(lambda: player_log(r"item=0 use src=audio .*listen=true"), 8, 0.5)
+    files = lambda: [x["name"] for x in srvlog()[n0:] if x["kind"] == "file"]
+    got = wait_for(lambda: "listen.mp3" in files(), 10, 0.5)
+    check("[只聽聲音] 切換 → 目前這支改播 mp3（同一個位置接著播）", a and a.get("ok") and sw and got, (a, player_log("listen|use src")[-3:], files()[-5:]))
+    check("[只聽聲音] 畫面全黑（不顯示封面）", bool(player_log(r"listen item=0 black screen")), player_log("listen")[-3:])
+    wait_for(lambda: player_log(r"playing=true"), 10, 0.5)
+    sub = wait_for(lambda: player_log(r"subtitle item=0 available=true"), 10, 0.5)
+    check("[只聽聲音] 字幕照樣可以顯示", sub, player_log("subtitle")[-2:])
+    shot("25_listen_black")
+    n1 = len(player_log(r"subtitle toggle"))
+    key("KEYCODE_DPAD_DOWN", 1, 1)
+    check("[只聽聲音] 下鍵照樣可以開關字幕", len(player_log(r"subtitle toggle -> ")) > n1, player_log("subtitle toggle")[-1:])
+    key("KEYCODE_DPAD_DOWN", 1, 1)                     # 字幕開回來
+    st = wait_for(lambda: rstate() if rstate().get("listen") else None, 10, 1)
+    check("[只聽聲音] 回報給手機：聲音模式開著", st and st.get("listening"), st)
+    dim = wait_for(lambda: player_log(r"listen dim=true"), 20, 1)
+    check("[只聽聲音] 10 秒沒按鍵 → 畫面亮度調到最低", dim, player_log("listen dim")[-1:])
+    # 選單鍵叫出控制列 → 找到「🎬 看影片」按鈕 → 確認
+    n2 = len(player_log(r"listen dim=false"))
+    key("KEYCODE_MENU", 1, 1.2)
+    check("[只聽聲音] 按鍵 → 亮度恢復", len(player_log(r"listen dim=false")) > n2, player_log("listen dim")[-2:])
+    found = False
+    for k in ["KEYCODE_DPAD_DOWN"] + ["KEYCODE_DPAD_RIGHT"] * 8 + ["KEYCODE_DPAD_LEFT"] * 10:
+        if player_log(r"focus -> listen"):
+            found = True
+            break
+        if not pg_ctl_visible():
+            key("KEYCODE_MENU", 1, 1)
+        key(k, 1, 0.5)
+    found = found or bool(player_log(r"focus -> listen"))
+    check("[只聽聲音] 選單鍵叫出的控制列上有「🎬 看影片／🎧 只聽聲音」按鈕", found, player_log("focus ->")[-6:])
+    shot("26_listen_button")
+    if found:
+        key("KEYCODE_DPAD_CENTER", 1, 1.5)
+        off = wait_for(lambda: player_log(r"listen mode=false"), 6, 0.5)
+        back = wait_for(lambda: player_log(r"item=\d use src=(original|low) .*listen=false"), 6, 0.5)
+        check("[只聽聲音] 按控制列的按鈕 → 切回看影片（同一支、接著播）", off and back, player_log("listen|use src")[-3:])
+    ack_of(inject("control", {"action": "listen", "value": "off"}))
+    ack_of(inject("control", {"action": "stop"}))
+    wait_for(lambda: "MainActivity" in resumed(), 15, 1)
+    pg.ev("prefLabels()")
+    lb = pg.ev("(function(){var b=document.getElementById('lbtn');return b&&b.style.display!=='none'?b.textContent:''})()")
+    check("[只聽聲音] ⚙ 設定頁也有「播放：🎬 看影片／🎧 只聽聲音」（新版 App 才顯示）", "看影片" in (lb or ""), lb)
+
+
+def pg_ctl_visible():
+    ls = ctl_lines()
+    return bool(ls) and "visible=true" in ls[-1]
+
+
 def main():
     pg = Page()
     INFO["device"] = sh("getprop", "ro.product.model").strip() + " / Android " + sh("getprop", "ro.build.version.release").strip()
@@ -875,6 +935,7 @@ def main():
     remote_cases(pg)
     home_rows_cases(pg)
     queue_cases(pg)
+    listen_cases(pg)
 
 
 try:

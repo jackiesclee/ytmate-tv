@@ -170,7 +170,7 @@ body{font-size:1.2vw}
   <div class="r">可硬體解碼：<b id="decs"></b></div>
   <div class="r">播放暫存：<b id="cacheInfo"></b></div>
   <div class="r">手機遙控：<b id="remoteInfo"></b></div>
-  <div class="btns"><div class="btn f" data-act="quality" id="qbtn"></div><div class="btn f" data-act="subs" id="sbtn"></div><div class="btn f" data-act="cache" id="cbtn"></div><div class="btn f" data-act="clearcache" id="ccbtn">🧹 清除暫存</div></div>
+  <div class="btns"><div class="btn f" data-act="quality" id="qbtn"></div><div class="btn f" data-act="subs" id="sbtn"></div><div class="btn f" data-act="listen" id="lbtn"></div><div class="btn f" data-act="cache" id="cbtn"></div><div class="btn f" data-act="clearcache" id="ccbtn">🧹 清除暫存</div></div>
   <div class="r" style="font-size:1vw">按確認鍵切換；設定會一直記住，直到你再改。原檔格式這台電視解不了時，會自動改播 480p 相容版。</div>
   <div class="btns"><div class="btn f" data-act="reload">↻ 重新整理</div><div class="btn f" data-act="unpair">⏏ 取消這台電視的配對</div><div class="btn f" data-act="close">返回</div></div>
 </div></div>
@@ -194,7 +194,8 @@ var DECODERS = nativeCall('decoders');          // App 回報這台電視能硬�
 //   quality：auto＝最佳畫質（依電視能力）、low＝480p 省流量（任何電視都能選）
 //   subs：en＝英文字幕優先（預設）、zh＝中文優先、off＝不顯示字幕
 //   cache：auto＝依電視剩餘空間自動決定播放暫存（最多 500MB）、off＝不暫存（2026-10-17）
-var PREF_DEFAULT = { quality: 'auto', subs: 'en', cache: 'auto' };
+var PREF_DEFAULT = { quality: 'auto', subs: 'en', cache: 'auto', listen: '0' };
+// listen：1＝🎧 只聽聲音（App v1.1.3 起；影片改播 mp3、畫面全黑、字幕照樣可以開關；整台電視一個設定）
 // 2026-10-17：小米電視（含小米盒子、Redmi 電視）預設用 480p 省流量畫質（H.264，最省電視解碼與兩岸網路頻寬，播放最順）。
 // 只改「預設值」：在 ⚙ 設定裡自己選過畫質的，照自己選的。
 var DEVINFO = (function () { try { return JSON.parse(nativeCall('deviceInfo') || '{}') || {}; } catch (e) { return {}; } })();
@@ -209,6 +210,7 @@ function getPref(k) { return rawPref(k) || PREF_DEFAULT[k]; }
 function setPref(k, v) {
   try { if (NATIVE && NATIVE.setPref) NATIVE.setPref(k, v); else window.localStorage.setItem('ytmate_' + k, v); } catch (e) {}
 }
+var L_LABEL = { '0': '播放：🎬 看影片', '1': '播放：🎧 只聽聲音' };
 var Q_LABEL = { auto: '畫質：自動（最佳）', low: '畫質：480p 省流量' };
 var S_LABEL = { en: '字幕：英文優先', zh: '字幕：中文優先', off: '字幕：關閉' };
 var C_LABEL = { auto: '暫存：自動', off: '暫存：關閉' };
@@ -436,6 +438,7 @@ function activate(el) {
   else if (act === 'unpair') unpair();
   else if (act === 'quality') { setPref('quality', getPref('quality') === 'low' ? 'auto' : 'low'); prefLabels(); S.prefChanged = true; toast(Q_LABEL[getPref('quality')]); }
   else if (act === 'subs') { var o = ['en', 'zh', 'off'], c = getPref('subs'); setPref('subs', o[(o.indexOf(c) + 1) % 3]); prefLabels(); toast(S_LABEL[getPref('subs')]); }
+  else if (act === 'listen') { setPref('listen', getPref('listen') === '1' ? '0' : '1'); prefLabels(); toast(L_LABEL[getPref('listen')] + '（下次播放開始套用；播放中也可以按選單鍵切換）', 3500); }
   else if (act === 'cache') { setPref('cache', getPref('cache') === 'off' ? 'auto' : 'off'); prefLabels(); toast(C_LABEL[getPref('cache')] + '（下次播放時生效）'); }
   else if (act === 'clearcache') { var freed = 0; try { freed = NATIVE && NATIVE.clearCache ? +NATIVE.clearCache() : 0; } catch (e) {} prefLabels(); toast('已清除播放暫存' + (freed ? '（' + fmtMB(freed) + '）' : '')); }
 }
@@ -961,6 +964,8 @@ function openSettings() {
 }
 function prefLabels() {
   $('qbtn').textContent = (Q_LABEL[getPref('quality')] || Q_LABEL.auto) + (IS_XIAOMI && !rawPref('quality') ? '（小米電視預設）' : ''); $('sbtn').textContent = S_LABEL[getPref('subs')] || S_LABEL.en;
+  $('lbtn').textContent = L_LABEL[getPref('listen')] || L_LABEL['0'];
+  $('lbtn').style.display = nativeCall('features').indexOf('listen') >= 0 ? '' : 'none';     // 舊版 App 沒有這個功能
   var hasCache = nativeHas('cacheInfo');
   $('cbtn').style.display = hasCache ? '' : 'none'; $('ccbtn').style.display = hasCache ? '' : 'none';
   $('cbtn').textContent = C_LABEL[getPref('cache')] || C_LABEL.auto;

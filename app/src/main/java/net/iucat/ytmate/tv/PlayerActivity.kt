@@ -20,6 +20,9 @@ import android.util.Log
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.KeyEvent
+import android.view.WindowManager
+import android.view.ViewGroup
+import android.graphics.drawable.StateListDrawable
 import android.view.View
 import android.webkit.CookieManager
 import android.widget.FrameLayout
@@ -100,6 +103,9 @@ import kotlin.concurrent.thread
  *     目前這支緩衝夠了就在背景先下載下一支的開頭（約 3 分鐘），切換時秒開。
  *   - v1.1.2：長按確認鍵＝打開右邊的「接下來播放」（這份清單接下來的影片＋待播清單）：
  *     上下選擇、確認＝播放這支、長按確認＝刪除、返回＝關閉。短按確認還是暫停／播放（放開時才決定）。
+ *   - v1.1.3：🎧 只聽聲音（控制列按鈕、⚙ 設定、手機都能切換；整台電視一個設定）：影片改播 mp3（省流量、電視不用解碼畫面），
+ *     畫面全黑、不顯示資訊（按鍵才跳出），字幕照樣可以開關／換語言；10 秒沒按鍵把畫面亮度調到最低（電視允許的話）。
+ *     沒有 mp3 的影片照樣播影片；音樂本來就是聲音，不受影響。
  */
 @OptIn(UnstableApi::class)
 class PlayerActivity : Activity() {
@@ -214,6 +220,12 @@ class PlayerActivity : Activity() {
     private var stallMs = 0L
     private var stallStart = 0L
     private var wasReady = false
+    // v1.1.3：🎧 只聽聲音（整台電視一個設定，記在 Prefs "listen"）：影片改播 mp3、畫面全黑（字幕照樣可以開關）
+    private var listenMode = false
+    private val listenOff = HashSet<Int>()           // 這次 mp3 播不了、改回影片的那幾支
+    private val listenMissingNoted = HashSet<Int>()
+    private var listenBtn: TextView? = null
+    private var dimmed = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -259,6 +271,7 @@ class PlayerActivity : Activity() {
         // 字幕：預設自動開啟、英文優先；照使用者上次的設定（控制列的字幕按鈕可以切換，切換後會記住）
         subPref = Prefs.get(this, "subs").ifEmpty { "en" }
         applySubPref()
+        listenMode = Prefs.get(this, "listen") == "1"
 
         buildUi()
         view.player = player
@@ -305,7 +318,7 @@ class PlayerActivity : Activity() {
                 val i = player.currentMediaItemIndex
                 val cur = items.getOrNull(i)?.sources?.getOrNull(srcIdx.getOrElse(i) { 0 }) ?: return
                 logSubtitle(tracks)
-                if (cur.kind == "audio") return
+                if (cur.kind == "audio" || listening(i)) return
                 var hasVideo = false
                 var videoOk = false
                 var mime = ""
@@ -388,6 +401,15 @@ class PlayerActivity : Activity() {
                     }, 2000L * n)
                     return
                 }
+                if (i in items.indices && listening(i)) {                             // 聲音檔播不了 → 這支改回影片
+                    listenOff.add(i)
+                    Log.i(TAG, "listen fallback item=$i -> video")
+                    Toast.makeText(this@PlayerActivity, "這支的聲音檔播不了，改播影片", Toast.LENGTH_SHORT).show()
+                    val pos = player.currentPosition.coerceAtLeast(0L)
+                    player.replaceMediaItem(i, buildItem(i)); player.seekTo(i, pos); player.prepare(); player.play()
+                    showItem(i)
+                    return
+                }
                 if (i in items.indices && srcIdx[i] < items[i].sources.size - 1) {   // 還有其他版本 → 先換版本
                     fallback(i, "這個版本無法播放，改用相容版本")
                     return
@@ -457,7 +479,7 @@ class PlayerActivity : Activity() {
         items.clear(); items.addAll(parsed)
         srcIdx = IntArray(items.size)
         netRetry = IntArray(items.size)
-        noted.clear(); resumed.clear()
+        noted.clear(); resumed.clear(); listenOff.clear(); listenMissingNoted.clear()
         cancelledIdx = -1; prefetchedIdx = -1; curIdx = -1
         hideCountdown()
         playlistTitle = root.optString("title")
@@ -589,6 +611,7 @@ class PlayerActivity : Activity() {
                 rememberPos(curIdx, curPos, curDur, false)
             }
             updateCountdown()
+            updateDim()
             maybePrefetch()
             ui.postDelayed(this, 1000)
         }
@@ -596,11 +619,12 @@ class PlayerActivity : Activity() {
 
     private fun buildItem(i: Int): MediaItem {
         val it = items[i]
-        val src = it.sources[srcIdx[i]]
+        val listen = listening(i)
+        val src = if (listen) audioSrc(i)!! else it.sources[srcIdx[i]]
         val meta = MediaMetadata.Builder().setTitle(it.title).setArtist(it.artist)
         if (it.thumb.isNotEmpty()) meta.setArtworkUri(Uri.parse(it.thumb))
-        val b = MediaItem.Builder().setUri(src.url).setMediaId("$i:${srcIdx[i]}").setMediaMetadata(meta.build())
-        if (it.subs.isNotEmpty() && src.kind != "audio") {
+        val b = MediaItem.Builder().setUri(src.url).setMediaId("$i:${srcIdx[i]}${if (listen) ":listen" else ""}").setMediaMetadata(meta.build())
+        if (it.subs.isNotEmpty() && (src.kind != "audio" || listen)) {      // 只聽聲音時字幕照樣可以顯示
             b.setSubtitleConfigurations(it.subs.map { x ->
                 val zh = x.lang.startsWith("zh")
                 MediaItem.SubtitleConfiguration.Builder(Uri.parse(x.url))
@@ -611,7 +635,7 @@ class PlayerActivity : Activity() {
                     .build()
             })
         }
-        Log.i(TAG, "item=$i use src=${src.kind} codec=${src.codec} url=${src.url}")
+        Log.i(TAG, "item=$i use src=${src.kind} codec=${src.codec} listen=$listen url=${src.url}")
         return b.build()
     }
 
@@ -800,6 +824,9 @@ class PlayerActivity : Activity() {
         upPanel.addView(upScroll, LinearLayout.LayoutParams(-1, 0, 1f))
         root.addView(upPanel, FrameLayout.LayoutParams(dp(430f), -1, Gravity.END))
         setContentView(root)
+        addListenButton()
+        // 自動測試版：記下焦點移到哪裡（測試程式據此找到控制列上的按鈕）
+        if (BuildConfig.E2E) root.viewTreeObserver.addOnGlobalFocusChangeListener { _, n -> Log.i(TAG, "focus -> ${viewName(n)}") }
     }
 
     private val hideOsd = Runnable { osd.visibility = View.GONE }
@@ -914,6 +941,93 @@ class PlayerActivity : Activity() {
 
     private fun isAudio(i: Int): Boolean = items.getOrNull(i)?.let { it.sources[srcIdx[i]].kind == "audio" } ?: false
 
+    // ══ 🎧 只聽聲音（v1.1.3）══
+    private fun audioSrc(i: Int): Src? = items.getOrNull(i)?.sources?.firstOrNull { s -> s.kind == "audio" }
+
+    /** 這支現在是不是「影片改播聲音」：聲音模式開著、這支是影片（不是本來就只有聲音的音樂）、有 mp3、這次沒有失敗過。 */
+    private fun listening(i: Int): Boolean {
+        val it = items.getOrNull(i) ?: return false
+        return listenMode && i !in listenOff && !isAudio(i) && it.sources.any { s -> s.kind == "audio" }
+    }
+
+    /** 控制列的「🎧 只聽聲音／🎬 看影片」按鈕、⚙ 設定、手機都走這裡：整台電視一個設定，目前這支從同一個位置換過去。 */
+    private fun setListen(on: Boolean): String {
+        listenMode = on
+        Prefs.set(this, "listen", if (on) "1" else "0")
+        listenOff.clear()
+        cancelPrefetch(); prefetchedIdx = -1
+        val cur = player.currentMediaItemIndex
+        val pos = player.currentPosition.coerceAtLeast(0L)
+        val playing = player.playWhenReady
+        for (k in items.indices) if (k != cur) player.replaceMediaItem(k, buildItem(k))
+        if (cur in items.indices) {
+            player.replaceMediaItem(cur, buildItem(cur))
+            player.seekTo(cur, pos)
+            player.prepare()
+            player.playWhenReady = playing
+        }
+        updateListenBtn()
+        showItem(cur)
+        undim()
+        val msg = when {
+            !on -> "🎬 看影片"
+            cur in items.indices && isAudio(cur) -> "🎧 只聽聲音（這支本來就是音樂）"
+            cur in items.indices && audioSrc(cur) == null -> "🎧 只聽聲音（這支沒有聲音檔，先播影片）"
+            else -> "🎧 只聽聲音：畫面全黑、更省流量"
+        }
+        Log.i(TAG, "listen mode=$on item=$cur pos=$pos")
+        showOsd(msg)
+        Remote.reportNow()
+        return msg
+    }
+
+    private fun updateListenBtn() {
+        listenBtn?.text = if (listenMode) "🎬 看影片" else "🎧 只聽聲音"
+    }
+
+    /** 控制列（選單鍵或上鍵叫出）右下角加一個「🎧 只聽聲音／🎬 看影片」按鈕。 */
+    private fun addListenButton() {
+        val bar = view.findViewById<ViewGroup>(androidx.media3.ui.R.id.exo_basic_controls) ?: run { Log.w(TAG, "listen button: no basic controls"); return }
+        val sel = StateListDrawable().apply {
+            addState(intArrayOf(android.R.attr.state_focused), roundBg("#FFFFFFFF", 18f))
+            addState(intArrayOf(), roundBg("#33FFFFFF", 18f))
+        }
+        val b = TextView(this).apply {
+            id = View.generateViewId()
+            tag = "listen"
+            textSize = 15f; typeface = Typeface.DEFAULT_BOLD
+            setPadding(dp(16f), dp(6f), dp(16f), dp(6f))
+            background = sel
+            isFocusable = true; isClickable = true
+            setTextColor(android.content.res.ColorStateList(arrayOf(intArrayOf(android.R.attr.state_focused), intArrayOf()),
+                intArrayOf(Color.parseColor("#111118"), Color.WHITE)))
+            gravity = Gravity.CENTER
+            setOnClickListener { setListen(!listenMode); view.showController() }
+        }
+        bar.addView(b, 0, LinearLayout.LayoutParams(-2, dp(36f)).apply { gravity = Gravity.CENTER_VERTICAL; marginEnd = dp(10f) })
+        listenBtn = b
+        updateListenBtn()
+    }
+
+    /** 只聽聲音時：沒有任何畫面元素、10 秒沒按鍵 → 把這個畫面的亮度調到最低（電視允許的話；不允許也不會出錯）。 */
+    private fun updateDim() {
+        val i = player.currentMediaItemIndex
+        val want = listening(i) && player.isPlaying && !view.isControllerFullyVisible && !upShown && !seekShown &&
+            SystemClock.uptimeMillis() - lastKeyAt > 10_000L
+        if (want && !dimmed) {
+            dimmed = true
+            window.attributes = window.attributes.apply { screenBrightness = 0.01f }
+            Log.i(TAG, "listen dim=true")
+        } else if (!want && dimmed) undim()
+    }
+
+    private fun undim() {
+        if (!dimmed) return
+        dimmed = false
+        window.attributes = window.attributes.apply { screenBrightness = WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE }
+        Log.i(TAG, "listen dim=false")
+    }
+
     /** 控制列出現 → 標題一起出現（看得到在播哪一支）；控制列收起 → 影片的標題也收起。選單鍵叫出的 → 右邊加摘要。 */
     private fun onControllerVisibility(visible: Boolean) {
         if (!::titleBox.isInitialized || !::player.isInitialized) return
@@ -955,6 +1069,9 @@ class PlayerActivity : Activity() {
         titleBox.animate().cancel(); titleBox.alpha = 1f
         ui.removeCallbacks(hideTitle)
         if (!audio && !controllerVisible) ui.postDelayed(hideTitle, 4000)       // 音樂一直顯示標題；影片 4 秒後隱藏
+        if (listenMode && !audio && audioSrc(i) == null && listenMissingNoted.add(i))
+            Toast.makeText(this, "這支沒有聲音檔，改播影片", Toast.LENGTH_SHORT).show()
+        if (listening(i)) Log.i(TAG, "listen item=$i black screen")
         if (audio) {
             art.setImageDrawable(null); artBg.setImageDrawable(null)
             art.visibility = View.VISIBLE; artBg.visibility = View.VISIBLE
@@ -1108,7 +1225,7 @@ class PlayerActivity : Activity() {
         }
         prefetchedIdx = n
         val it = items[n]
-        val src = it.sources[srcIdx[n]]
+        val src = if (listening(n)) audioSrc(n)!! else it.sources[srcIdx[n]]
         val durMs = it.durMs
         val cap = MediaCache.capBytes
         prefetchExec.execute {
@@ -1169,6 +1286,7 @@ class PlayerActivity : Activity() {
                 .put("buffered", (player.bufferedPosition - player.currentPosition).coerceAtLeast(0L) / 1000.0)
                 .put("stalls", stalls).put("stall_ms", stallMs + (if (stallStart > 0) SystemClock.uptimeMillis() - stallStart else 0L))
                 .put("prefetching", prefetchWriter != null).put("cache", cacheFactory != null)
+                .put("listen", listenMode).put("listening", listening(i))
         }
         return o
     }
@@ -1206,6 +1324,11 @@ class PlayerActivity : Activity() {
                 if (v in setOf("en", "zh", "off")) { subPref = v; Prefs.set(this, "subs", v); applySubPref(); true to "字幕：$v" } else false to "字幕設定不對"
             }
             "quality" -> switchQuality(value?.toString() ?: "")
+            "listen" -> {
+                val v = value?.toString() ?: ""
+                val on = when (v) { "on", "1", "true" -> true; "off", "0", "false" -> false; else -> !listenMode }
+                true to setListen(on)
+            }
             "volume_up", "volume_down", "volume_set", "mute" -> Remote.volume(action, value)
             else -> false to "這個版本的 App 不認得這個操作"
         }
@@ -1218,6 +1341,7 @@ class PlayerActivity : Activity() {
         val code = event.keyCode
         val controllerShown = view.isControllerFullyVisible
         lastKeyAt = SystemClock.uptimeMillis()
+        if (dimmed) undim()
         if (event.action == KeyEvent.ACTION_DOWN) {
             if (event.repeatCount == 0) Log.i(TAG, "key ${KeyEvent.keyCodeToString(code)} shown=$controllerShown focus=${focusName()}")
             if (upShown) return upKey(event)
@@ -1496,8 +1620,10 @@ class PlayerActivity : Activity() {
         return target
     }
 
-    private fun focusName(): String = try {
-        currentFocus?.let { f -> if (f.id != View.NO_ID) resources.getResourceEntryName(f.id) else f.javaClass.simpleName } ?: "none"
+    private fun focusName(): String = viewName(currentFocus)
+
+    private fun viewName(f: View?): String = try {
+        f?.let { v -> if (v.tag == "listen") "listen" else if (v.id != View.NO_ID) resources.getResourceEntryName(v.id) else v.javaClass.simpleName } ?: "none"
     } catch (_: Exception) { "?" }
 
     private fun togglePlay() {
