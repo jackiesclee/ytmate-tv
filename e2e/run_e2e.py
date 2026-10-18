@@ -438,7 +438,12 @@ def remote_cases(pg):
     ci = json.loads(pg.ev("window.YTmateTV && YTmateTV.cacheInfo ? YTmateTV.cacheInfo() : '{}'") or "{}")
     INFO["cache"] = ci
     if ci.get("cap", 0) > 0:
-        pf = wait_for(lambda: player_log(r"prefetch item=1 .*done"), 30, 1)
+        # 前面的步驟可能已經用掉 40 秒測試影片的大部分時間 → 重新送一份清單、清掉暫存，從頭等預先下載（避免影片先播完）
+        pg.ev("window.YTmateTV && YTmateTV.clearCache && YTmateTV.clearCache()")
+        adb("logcat", "-c")
+        n_srv = len(srvlog())
+        ack_of(inject("play", {"video_ids": ["h264", "av1"], "start_pos": 1}))
+        pf = wait_for(lambda: player_log(r"prefetch item=1 .*done"), 35, 1)
         files = [x for x in srvlog()[n_srv:] if x["kind"] == "req" and x["path"].startswith("/api/files/video/") and x.get("range")]
         check("[預先下載] 目前這支緩衝夠了 → 在背景先下載下一支的開頭", pf and files, (player_log("prefetch|playing=|transition")[-4:], [f["path"] + " " + f["range"] for f in files][-3:]))
     else:
