@@ -401,7 +401,8 @@ object Prefs {
     // 使用者設定：只接受這幾個鍵與值（頁面不能拿這個存任意資料；取消配對也不會清掉）
     private val ALLOWED = mapOf("quality" to setOf("auto", "low"), "subs" to setOf("en", "zh", "off"),
         "subs_last" to setOf("en", "zh"),          // 播放器按「下」關字幕前的語言（再打開時用）
-        "cache" to setOf("auto", "off"))           // 2026-10-17：播放暫存（auto＝依剩餘空間自動、off＝不暫存）
+        "cache" to setOf("auto", "off"),           // 2026-10-17：播放暫存（auto＝依剩餘空間自動、off＝不暫存）
+        "listen" to setOf("0", "1"))               // 2026-10-18（v1.1.3）：🎧 只聽聲音（1＝影片改播 mp3、畫面全黑）
 
     fun get(ctx: Context, key: String): String {
         if (key !in ALLOWED) return ""
