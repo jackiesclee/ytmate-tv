@@ -1039,7 +1039,12 @@ class PlayerActivity : Activity() {
             titleText.text = it.title
             subText.text = listOf(it.artist, "${i + 1} / ${items.size}").filter { s -> s.isNotEmpty() }.joinToString("  ·  ")
             titleBox.animate().cancel(); titleBox.alpha = 1f
-            if (menuOpened) showSummary(i)
+            if (menuOpened) {
+                showSummary(i)
+                // v1.1.3：選單鍵叫出的控制列 → 焦點直接放在「🎧 只聽聲音／🎬 看影片」（使用者要「在選單內切換」：選單→確認就切換）；
+                // 上鍵叫出的控制列照舊停在播放／暫停
+                ui.postDelayed({ if (controllerVisible && menuOpened) listenBtn?.let { b -> if (b.requestFocus()) Log.i(TAG, "listen button focused") } }, 150)
+            }
         } else {
             summaryBox.visibility = View.GONE
             menuOpened = false

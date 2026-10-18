@@ -683,16 +683,10 @@ def listen_cases(pg):
     n2 = len(player_log(r"listen dim=false"))
     key("KEYCODE_MENU", 1, 1.2)
     check("[只聽聲音] 按鍵 → 亮度恢復", len(player_log(r"listen dim=false")) > n2, player_log("listen dim")[-2:])
+    # 選單鍵叫出的控制列：焦點直接停在這個按鈕上（選單 → 確認＝切換）
     on_btn = lambda: (player_log(r"focus -> ") or [""])[-1].endswith("focus -> listen")    # 焦點「現在」停在按鈕上
-    found = on_btn()
-    for k in ["KEYCODE_DPAD_DOWN"] + ["KEYCODE_DPAD_RIGHT"] * 8 + ["KEYCODE_DPAD_LEFT"] * 10:
-        if found:
-            break
-        if not pg_ctl_visible():
-            key("KEYCODE_MENU", 1, 1)
-        key(k, 1, 0.6)
-        found = on_btn()
-    check("[只聽聲音] 選單鍵叫出的控制列上有「🎬 看影片／🎧 只聽聲音」按鈕", found, player_log("focus ->")[-6:])
+    found = bool(wait_for(lambda: on_btn() and player_log(r"listen button focused"), 4, 0.3))
+    check("[只聽聲音] 選單鍵叫出控制列 → 焦點直接在「🎬 看影片／🎧 只聽聲音」按鈕上", found, player_log("focus ->")[-6:])
     shot("26_listen_button")
     if found:
         key("KEYCODE_DPAD_CENTER", 1, 1.5)
@@ -705,11 +699,6 @@ def listen_cases(pg):
     pg.ev("prefLabels()")
     lb = pg.ev("(function(){var b=document.getElementById('lbtn');return b&&b.style.display!=='none'?b.textContent:''})()")
     check("[只聽聲音] ⚙ 設定頁也有「播放：🎬 看影片／🎧 只聽聲音」（新版 App 才顯示）", "看影片" in (lb or ""), lb)
-
-
-def pg_ctl_visible():
-    ls = ctl_lines()
-    return bool(ls) and "visible=true" in ls[-1]
 
 
 def main():
