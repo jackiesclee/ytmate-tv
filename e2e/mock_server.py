@@ -130,7 +130,8 @@ def home():
         card = lambda vid, t, **kw: {"video_id": vid, "title": t, "duration": 40, "thumb": f"/api/files/thumb/{THUMBS[len(vid) % 4]}",
                                      "channel_name": "🎬 格式測試", "resume": 0, "watched": False, "is_new": False, "description": "", **kw}
         resp["rows"] = {
-            "hero": [card("h264", "最新節目：H.264", description="第一集的說明"), card("av1", "最新節目：AV1", description="第二集的說明")],
+            "hero": [card("h264", "最新同步：H.264", description="第一支的說明"), card("av1", "最新同步：AV1", description="第二支的說明")],
+            "hero_label": "最新同步",
             "cont": [card("h264", "H.264 原檔影片", resume=12, resume_dur=40), card("av1", "AV1 原檔影片", resume=8, resume_dur=40)],
             "recent": [card("av1_unknown", "AV1（不知道格式）", is_new=True), card("music", "純音樂")],
             "shows": [card("h264", "最新節目：H.264"), card("av1", "最新節目：AV1")],

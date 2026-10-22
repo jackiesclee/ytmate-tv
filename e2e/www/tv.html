@@ -466,7 +466,7 @@ function onFocusChanged(el) {
 // 上方大圖：左邊與下面淡出（舊核心不支援遮罩時只是邊緣比較硬）
 function spImg(url, op) { return url ? '<div class="sp-wrap"' + (op ? ' style="opacity:' + op + '"' : '') + '><div class="sp-img" style="background-image:url(\'' + esc(url) + '\')"></div></div>' : ''; }
 function setBg(url) { $('bgart').style.backgroundImage = url ? 'url("' + url + '")' : 'none'; }
-var ROW_LABEL = { hero: '最新節目', cont: '繼續觀看', recent: '最新同步', shows: '我的節目', queue: '待播清單' };
+var ROW_LABEL = { hero: '最新同步', cont: '繼續觀看', recent: '最新同步', shows: '我的節目', queue: '待播清單' };
 function heroItems() { return S.rowItems.hero || []; }
 function showHeroSlide() {
   var list = heroItems(), it = list[S.heroIdx];
@@ -474,7 +474,7 @@ function showHeroSlide() {
   var dots = '<span class="dots">' + list.map(function (x, i) { return '<i' + (i === S.heroIdx ? ' class="on"' : '') + '></i>'; }).join('') + '</span>';
   $('spot').className = 'hero-on';
   $('spot').innerHTML = spImg(it.thumb) +
-    '<div class="sp-text"><div class="sp-label">🎙️ 最新節目 ' + (S.heroIdx + 1) + ' / ' + list.length + '</div><h1>' + esc(it.title) + '</h1>' +
+    '<div class="sp-text"><div class="sp-label">' + (S.heroLabel === '最新節目' ? '🎙️ 最新節目 ' : '🆕 最新同步 ') + (S.heroIdx + 1) + ' / ' + list.length + '</div><h1>' + esc(it.title) + '</h1>' +
     '<div class="sp-meta">' + metaHtml(it) + '</div>' +
     (it.description ? '<div class="sp-desc" style="-webkit-line-clamp:2;min-height:0">' + esc(it.description) + '</div>' : '') +
     '<div class="hero-btn f' + (S.focusEl && S.focusEl.getAttribute('data-act') === 'hero' ? ' focus' : '') + '" data-act="hero" id="heroBtn">▶ 立即播放</div>' + dots + '<span style="margin-left:1vw;color:#9a9ab0;font-size:1vw">左右鍵切換</span></div>';
@@ -578,6 +578,8 @@ function renderHome(focusVid) {
   S.view = 'home'; S.channel = null; S.rowItems = {};
   var R = S.rows || {}, h = '';
   if (R.hero && R.hero.length) S.rowItems.hero = R.hero;
+  S.heroLabel = R.hero_label || '最新同步';      // 2026-10-22 晚：大橫幅改用「最新同步」的影片（伺服器沒有新同步時才退回最新節目）
+  ROW_LABEL.hero = S.heroLabel;
   if (S.heroIdx >= heroItems().length) S.heroIdx = 0;
   h += '<div id="qrow">' + queueRowHtml() + '</div>';
   h += rowHtml('cont', '▶ 繼續觀看', R.cont);
