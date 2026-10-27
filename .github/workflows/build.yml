@@ -15,6 +15,8 @@ on:
       - ".github/workflows/e2e.yml"
       - "esp32/**"                     # 跳跳（ESP32）韌體另外編譯，見 esp32.yml
       - ".github/workflows/esp32.yml"
+      - "mobile/**"                    # 手機版另外編譯，見 mobile.yml
+      - ".github/workflows/mobile.yml"
       - "**.md"
   workflow_dispatch:
 

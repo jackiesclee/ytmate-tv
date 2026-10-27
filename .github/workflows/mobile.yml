@@ -1,0 +1,88 @@
+# YTmate 手機／平板版（小米手機、紅米手機、小米平板）：推送 mobile/ 底下的檔案（或手動 Run workflow）自動編譯，
+# Releases 的「mobile-v1.0.N」下載 YTmateMobile-v1.0.N.apk。簽章跟電視版同一把（GitHub Secrets），之後可以直接覆蓋安裝。
+name: Build Mobile APK
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "mobile/**"
+      - ".github/workflows/mobile.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
+
+      - name: 準備簽章金鑰
+        env:
+          KS_B64: ${{ secrets.YTMATE_KEYSTORE_BASE64 }}
+          KS_PW: ${{ secrets.YTMATE_KEYSTORE_PASSWORD }}
+          KS_ALIAS: ${{ secrets.YTMATE_KEY_ALIAS }}
+          KS_KEYPW: ${{ secrets.YTMATE_KEY_PASSWORD }}
+        run: |
+          if [ -n "$KS_B64" ]; then
+            echo "$KS_B64" | base64 -d > "$RUNNER_TEMP/release.jks"
+            {
+              echo "YTMATE_KEYSTORE=$RUNNER_TEMP/release.jks"
+              echo "YTMATE_KEYSTORE_PASSWORD=$KS_PW"
+              echo "YTMATE_KEY_ALIAS=$KS_ALIAS"
+              echo "YTMATE_KEY_PASSWORD=$KS_KEYPW"
+            } >> "$GITHUB_ENV"
+            echo "使用 Secrets 的正式簽章"
+          elif [ -f keystore/release.jks ] && [ -f keystore/keystore.properties ]; then
+            set -a; . keystore/keystore.properties; set +a
+            {
+              echo "YTMATE_KEYSTORE=$GITHUB_WORKSPACE/keystore/release.jks"
+              echo "YTMATE_KEYSTORE_PASSWORD=$KEYSTORE_PASSWORD"
+              echo "YTMATE_KEY_ALIAS=$KEY_ALIAS"
+              echo "YTMATE_KEY_PASSWORD=$KEY_PASSWORD"
+            } >> "$GITHUB_ENV"
+            echo "使用 repo 內的正式簽章"
+          else
+            echo "::warning::沒有正式簽章，改用除錯簽章（更新 App 時需先移除舊版）"
+          fi
+
+      - name: 編譯 APK
+        run: gradle :mobile:assembleRelease --no-daemon --stacktrace
+
+      - name: 整理檔名
+        id: apk
+        run: |
+          V="1.0.${{ github.run_number }}"
+          mkdir -p out
+          cp mobile/build/outputs/apk/release/mobile-release.apk "out/YTmateMobile-v${V}.apk"
+          echo "version=${V}" >> "$GITHUB_OUTPUT"
+          ls -la out
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: YTmateMobile-v${{ steps.apk.outputs.version }}
+          path: out/*.apk
+
+      - name: 建立 Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: mobile-v${{ steps.apk.outputs.version }}
+          name: YTmate 手機版 v${{ steps.apk.outputs.version }}
+          prerelease: true
+          files: out/*.apk
+          body: |
+            YTmate 手機／平板版（小米手機、紅米手機、小米平板；Android 7.0 以上）
+            安裝：用手機瀏覽器下載 APK → 開啟安裝（第一次需允許「安裝未知應用」）。
+            第一次開啟輸入 YTmate 密碼；建議到「更多 → 允許背景執行」，背景播放與錄音才不會被小米省電關掉。

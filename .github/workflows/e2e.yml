@@ -11,6 +11,8 @@ on:
     paths-ignore:                      # 只改跳跳（ESP32）韌體時不用跑電視測試
       - "esp32/**"
       - ".github/workflows/esp32.yml"
+      - "mobile/**"                    # 手機版另外編譯，見 mobile.yml
+      - ".github/workflows/mobile.yml"
   workflow_dispatch:
 
 permissions:

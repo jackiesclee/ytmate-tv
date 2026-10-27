@@ -7,3 +7,4 @@ dependencyResolutionManagement {
 }
 rootProject.name = "YTmateTV"
 include(":app")
+include(":mobile")   // 2026-10-27：YTmate 手機／平板版
