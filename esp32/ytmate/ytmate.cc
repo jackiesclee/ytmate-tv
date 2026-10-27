@@ -15,6 +15,9 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 #include <freertos/task.h>
+#include <freertos/idf_additions.h>
+#include <esp_attr.h>
+#include <esp_system.h>
 
 #include "application.h"
 #include "assets/lang_config.h"
@@ -71,6 +74,18 @@ OggOpusWriter* ogg = nullptr;
 void* opus = nullptr;
 int opus_in_bytes = 0, opus_out_bytes = 0;
 int dimmed = 0;
+std::atomic<bool> enc_busy{false};      // 編碼工作正在處理一次錄音
+SemaphoreHandle_t audio_done = nullptr;
+
+// 2026-10-27 v1.0.2：跳跳在錄音開始時重開機 → 記下「做到哪一步」（重開機後保留），下次開機顯示在螢幕上，方便回報
+RTC_NOINIT_ATTR uint32_t g_step_magic;
+RTC_NOINIT_ATTR char g_step[48];
+void Step(const char* s) {
+    g_step_magic = 0x59544D41;
+    strncpy(g_step, s, sizeof(g_step) - 1);
+    g_step[sizeof(g_step) - 1] = 0;
+    ESP_LOGI(TAG, "步驟：%s", s);
+}
 
 // ── 小工具 ───────────────────────────────────────────────────────────────
 std::string Token() { Settings s("ytmate", false); return s.GetString("token"); }
@@ -211,32 +226,65 @@ void SealChunk(bool force) {
     }
 }
 
+// 編碼工作：開機時建立一次、永遠不刪（Opus 編碼很吃堆疊，用 32 KB 的 PSRAM 堆疊；v1.0.1 用 16 KB 內部記憶體會當機）
+bool OpenEncoder() {
+    esp_opus_enc_config_t cfg = {};
+    cfg.sample_rate = ESP_AUDIO_SAMPLE_RATE_16K;
+    cfg.channel = ESP_AUDIO_MONO;
+    cfg.bits_per_sample = ESP_AUDIO_BIT16;
+    cfg.bitrate = kBitrate;
+    cfg.frame_duration = ESP_OPUS_ENC_FRAME_DURATION_60_MS;
+    cfg.application_mode = ESP_OPUS_ENC_APPLICATION_AUDIO;
+    cfg.complexity = 0;       // 跟小智一樣（省 CPU 與堆疊）
+    cfg.enable_fec = false;
+    cfg.enable_dtx = false;   // 檔案要連續時間軸，不省略靜音
+    cfg.enable_vbr = true;
+    if (esp_opus_enc_open(&cfg, sizeof(cfg), &opus) != ESP_AUDIO_ERR_OK || !opus) return false;
+    esp_opus_enc_get_frame_size(opus, &opus_in_bytes, &opus_out_bytes);
+    return true;
+}
+
 void EncoderTask(void*) {
-    std::vector<uint8_t> out(opus_out_bytes > 0 ? opus_out_bytes : 1500);
+    std::vector<uint8_t> out(1500);
     while (true) {
-        std::vector<int16_t>* pcm = nullptr;
-        if (xQueueReceive(pcm_q, &pcm, pdMS_TO_TICKS(200)) == pdTRUE && pcm) {
-            if ((int)pcm->size() * 2 == opus_in_bytes) {
-                esp_audio_enc_in_frame_t in = {.buffer = (uint8_t*)pcm->data(), .len = (uint32_t)opus_in_bytes};
-                esp_audio_enc_out_frame_t o = {.buffer = out.data(), .len = (uint32_t)out.size(), .encoded_bytes = 0};
-                if (esp_opus_enc_process(opus, &in, &o) == ESP_AUDIO_ERR_OK && o.encoded_bytes > 0) {
-                    AppendBytes(ogg->AddPacket(out.data(), o.encoded_bytes));
-                    SealChunk(false);
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);           // 等 ControlTask 叫我開始
+        Step("開啟編碼器");
+        bool ok = OpenEncoder();
+        xSemaphoreGive(audio_done);                         // 回報開啟結果（ok 存在 opus 是否為空）
+        if (!ok) { enc_busy = false; continue; }
+        if (out.size() < (size_t)opus_out_bytes) out.resize(opus_out_bytes);
+        bool first = true;
+        while (true) {
+            std::vector<int16_t>* pcm = nullptr;
+            if (xQueueReceive(pcm_q, &pcm, pdMS_TO_TICKS(200)) == pdTRUE && pcm) {
+                if ((int)pcm->size() * 2 == opus_in_bytes) {
+                    if (first) Step("第一段聲音編碼");
+                    esp_audio_enc_in_frame_t in = {.buffer = (uint8_t*)pcm->data(), .len = (uint32_t)opus_in_bytes};
+                    esp_audio_enc_out_frame_t o = {.buffer = out.data(), .len = (uint32_t)out.size(), .encoded_bytes = 0};
+                    if (esp_opus_enc_process(opus, &in, &o) == ESP_AUDIO_ERR_OK && o.encoded_bytes > 0) {
+                        AppendBytes(ogg->AddPacket(out.data(), o.encoded_bytes));
+                        SealChunk(false);
+                    }
+                    if (first) { Step("錄音中"); first = false; }
                 }
+                delete pcm;
+                continue;
             }
-            delete pcm;
-            continue;
+            if (state == kFinishing && uxQueueMessagesWaiting(pcm_q) == 0) {
+                if (ogg) { AppendBytes(ogg->Flush(true)); delete ogg; ogg = nullptr; }
+                SealChunk(true);
+                esp_opus_enc_close(opus); opus = nullptr;
+                break;
+            }
         }
-        if (state == kFinishing && uxQueueMessagesWaiting(pcm_q) == 0 && ogg) {
-            AppendBytes(ogg->Flush(true));
-            SealChunk(true);
-            delete ogg; ogg = nullptr;
-            esp_opus_enc_close(opus); opus = nullptr;
-            break;
-        }
+        enc_busy = false;
     }
-    enc_task = nullptr;
-    vTaskDelete(nullptr);
+}
+
+// 小智的音訊開關要在主工作執行（從別的工作直接呼叫，喚醒詞引擎可能當機）
+void RunOnMain(std::function<void()> fn) {
+    Application::GetInstance().Schedule([fn]() { fn(); xSemaphoreGive(audio_done); });
+    xSemaphoreTake(audio_done, pdMS_TO_TICKS(3000));
 }
 
 // ── 上傳：有網路就把分塊依序 PUT 上去；全部傳完＋錄音結束 → finish ─────────────
@@ -258,9 +306,10 @@ void UploaderTask(void*) {
         {
             std::lock_guard<std::mutex> lk(mu);
             if (!pending.empty()) { c = pending.front(); have = true; }
-            enc_done = (state == kFinishing && enc_task == nullptr && !cur.data);
+            enc_done = (state == kFinishing && !enc_busy && !cur.data);
         }
         if (!have && enc_done) {
+            Step("上傳收尾");
             if (rid.empty() && next_idx == 0) break;                 // 什麼都沒錄到
             if (!WifiUp() || (rid.empty() && !CreateOnServer())) { vTaskDelay(pdMS_TO_TICKS(backoff * 1000)); continue; }
             std::string b = "{\"chunks\":" + std::to_string(next_idx) + "}";
@@ -304,6 +353,7 @@ void UploaderTask(void*) {
         rid.clear();
     }
     state = kIdle;
+    Step("待命");
     up_task = nullptr;
     vTaskDelete(nullptr);
 }
@@ -324,9 +374,11 @@ std::string Prompt(size_t budget) {
 }
 
 void StopAudio() {
-    auto& as = Application::GetInstance().GetAudioService();
-    as.EnableRecording(false);
-    as.EnableWakeWordDetection(true);
+    RunOnMain([]() {
+        auto& as = Application::GetInstance().GetAudioService();
+        as.EnableRecording(false);
+        as.EnableWakeWordDetection(true);
+    });
     auto* bl = Board::GetInstance().GetBacklight();
     if (bl && dimmed) { bl->RestoreBrightness(); dimmed = 0; }
 }
@@ -355,38 +407,36 @@ void ControlTask(void*) {
     }
     if (cancel_req) { Say("已取消錄音"); state = kIdle; vTaskDelete(nullptr); return; }
 
-    // 開編碼器與 Ogg
-    esp_opus_enc_config_t cfg = {};
-    cfg.sample_rate = ESP_AUDIO_SAMPLE_RATE_16K;
-    cfg.channel = ESP_AUDIO_MONO;
-    cfg.bits_per_sample = ESP_AUDIO_BIT16;
-    cfg.bitrate = kBitrate;
-    cfg.frame_duration = ESP_OPUS_ENC_FRAME_DURATION_60_MS;
-    cfg.application_mode = ESP_OPUS_ENC_APPLICATION_AUDIO;
-    cfg.complexity = 1;
-    cfg.enable_fec = false;
-    cfg.enable_dtx = false;   // 檔案要連續時間軸，不省略靜音
-    cfg.enable_vbr = true;
-    if (esp_opus_enc_open(&cfg, sizeof(cfg), &opus) != ESP_AUDIO_ERR_OK || !opus) {
-        Say("錄音編碼器啟動失敗"); state = kIdle; vTaskDelete(nullptr); return;
-    }
-    esp_opus_enc_get_frame_size(opus, &opus_in_bytes, &opus_out_bytes);
+    // 開編碼器（在編碼工作裡開，堆疊夠大）與 Ogg
+    if (!enc_task) { Say("錄音工作沒有建立成功（記憶體不足），請重新開機再試"); state = kIdle; vTaskDelete(nullptr); return; }
     {
         std::lock_guard<std::mutex> lk(mu);
         buffer_budget = budget; next_idx = 0; uploaded = 0; rid.clear(); pending_bytes = 0; cur = Chunk();
     }
     ogg = new OggOpusWriter(kSampleRate, 2880, (uint32_t)esp_timer_get_time());
     AppendBytes(ogg->Header());
-    if (!pcm_q) pcm_q = xQueueCreate(32, sizeof(void*));
-    xTaskCreate(EncoderTask, "ytm_enc", 16 * 1024, nullptr, 3, &enc_task);
+    enc_busy = true;
+    xSemaphoreTake(audio_done, 0);
+    xTaskNotifyGive(enc_task);
+    xSemaphoreTake(audio_done, pdMS_TO_TICKS(3000));
+    if (!opus) {
+        Say("錄音編碼器啟動失敗，請重新開機再試");
+        enc_busy = false; delete ogg; ogg = nullptr;
+        { std::lock_guard<std::mutex> lk(mu); if (cur.data) heap_caps_free(cur.data); cur = Chunk(); }
+        state = kIdle; vTaskDelete(nullptr); return;
+    }
+    Step("建立上傳工作");
     if (!up_task) xTaskCreate(UploaderTask, "ytm_up", 10 * 1024, nullptr, 2, &up_task);
-    if (!enc_task || !up_task) ESP_LOGE(TAG, "建立錄音工作失敗（記憶體不足）");
+    if (!up_task) ESP_LOGE(TAG, "建立上傳工作失敗（記憶體不足），錄音先存著");
 
-    auto& as = app.GetAudioService();
-    as.EnableWakeWordDetection(false);          // 錄音時麥克風專給錄音用（不偵測「你好小智」）
-    as.EnableRecording(true);
+    Step("打開麥克風");
+    state = kRecording;                       // 先設好，麥克風一來就收
+    RunOnMain([]() {
+        auto& as = Application::GetInstance().GetAudioService();
+        as.EnableWakeWordDetection(false);    // 錄音時麥克風專給錄音用（不偵測「你好小智」）
+        as.EnableRecording(true);
+    });
     rec_start_us = esp_timer_get_time();
-    state = kRecording;
     app.PlaySound(Lang::Sounds::OGG_SUCCESS);
     ESP_LOGI(TAG, "開始錄音（暫存上限 %u KB）", (unsigned)(budget / 1024));
 
@@ -420,6 +470,7 @@ void ControlTask(void*) {
     }
     rec_end_us = esp_timer_get_time();
     state = kFinishing;
+    Step("停止錄音");
     StopAudio();
     app.PlaySound(Lang::Sounds::OGG_POPUP);
     int64_t sec = (rec_end_us - rec_start_us) / 1000000;
@@ -461,6 +512,21 @@ std::string StatusText() {
 
 void Init() {
     Application::GetInstance().GetAudioService().SetRecordingSink(OnPcm);
+    audio_done = xSemaphoreCreateBinary();
+    pcm_q = xQueueCreate(32, sizeof(void*));
+    // 編碼工作：32 KB 堆疊放 PSRAM（只做運算、不碰快閃記憶體）；PSRAM 不行再用內部記憶體 24 KB
+    if (xTaskCreatePinnedToCoreWithCaps(EncoderTask, "ytm_enc", 32 * 1024, nullptr, 3, &enc_task, 1, MALLOC_CAP_SPIRAM) != pdPASS) {
+        enc_task = nullptr;
+        if (xTaskCreate(EncoderTask, "ytm_enc", 24 * 1024, nullptr, 3, &enc_task) != pdPASS) enc_task = nullptr;
+    }
+    // 上次在錄音途中重開機 → 告訴使用者停在哪一步
+    esp_reset_reason_t why = esp_reset_reason();
+    if (g_step_magic == 0x59544D41 && why != ESP_RST_POWERON && why != ESP_RST_SW && strcmp(g_step, "待命") != 0) {
+        static char msg[160];
+        snprintf(msg, sizeof msg, "⚠️ 上次錄音時重開機了（停在：%s，原因代碼 %d）。請截圖給 YTmate。", g_step, (int)why);
+        xTaskCreate([](void*) { vTaskDelay(pdMS_TO_TICKS(8000)); Say(msg); vTaskDelete(nullptr); }, "ytm_msg", 4096, nullptr, 1, nullptr);
+    }
+    Step("待命");
     auto& mcp = McpServer::GetInstance();
     mcp.AddTool("self.ytmate.start_recording",
         "開始錄音（會議、上課、筆記），錄音邊錄邊上傳到 YTmate 的錄音頻道，伺服器會自動轉文字和做摘要。"

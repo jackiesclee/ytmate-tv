@@ -126,4 +126,9 @@ patch(BOARD, [
     ("        InitializeTools();\n    }",
      "        InitializeTools();\n        ytmate::Init();\n    }"),
 ])
+# 6) 編譯設定：允許工作的堆疊放在 PSRAM（YTmate 的 Opus 編碼工作需要 32 KB 堆疊；內部記憶體不夠）
+patch("main/boards/waveshare/esp32-s3-touch-amoled-1.8-v2/config.json", [
+    ('"CONFIG_USE_WECHAT_MESSAGE_STYLE=y"',
+     '"CONFIG_USE_WECHAT_MESSAGE_STYLE=y",\n                "CONFIG_SPIRAM_ALLOW_STACK_EXTERNAL_MEMORY=y"'),
+])
 print("🎉 YTmate 修改全部套用完成")
