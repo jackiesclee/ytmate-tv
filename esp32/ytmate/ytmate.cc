@@ -271,9 +271,13 @@ void EncoderTask(void*) {
                 continue;
             }
             if (state == kFinishing && uxQueueMessagesWaiting(pcm_q) == 0) {
+                Step("編碼收尾：最後一頁");
                 if (ogg) { AppendBytes(ogg->Flush(true)); delete ogg; ogg = nullptr; }
+                Step("編碼收尾：最後一塊");
                 SealChunk(true);
+                Step("編碼收尾：關閉編碼器");
                 esp_opus_enc_close(opus); opus = nullptr;
+                Step("等待上傳");
                 break;
             }
         }
@@ -374,13 +378,15 @@ std::string Prompt(size_t budget) {
 }
 
 void StopAudio() {
-    RunOnMain([]() {
-        auto& as = Application::GetInstance().GetAudioService();
-        as.EnableRecording(false);
-        as.EnableWakeWordDetection(true);
-    });
-    auto* bl = Board::GetInstance().GetBacklight();
-    if (bl && dimmed) { bl->RestoreBrightness(); dimmed = 0; }
+    // v1.0.4：只關掉錄音資料流；喚醒詞從頭到尾不動（錄音資料流優先，錄音時喚醒詞本來就收不到聲音）
+    Step("停止：關錄音資料流");
+    RunOnMain([]() { Application::GetInstance().GetAudioService().EnableRecording(false); });
+    Step("停止：恢復螢幕亮度");
+    if (dimmed) {
+        dimmed = 0;
+        RunOnMain([]() { auto* bl = Board::GetInstance().GetBacklight(); if (bl) bl->RestoreBrightness(); });
+    }
+    Step("停止：亮度恢復完成");
 }
 
 // 背景控制流程：（配對）→ 等小智對話結束 → 提示＋倒數 → 錄音 → 監看 → 結束
@@ -431,11 +437,7 @@ void ControlTask(void*) {
 
     Step("打開麥克風");
     state = kRecording;                       // 先設好，麥克風一來就收
-    RunOnMain([]() {
-        auto& as = Application::GetInstance().GetAudioService();
-        as.EnableWakeWordDetection(false);    // 錄音時麥克風專給錄音用（不偵測「你好小智」）
-        as.EnableRecording(true);
-    });
+    RunOnMain([]() { Application::GetInstance().GetAudioService().EnableRecording(true); });   // 錄音資料流優先：錄音時聽不到「你好小智」
     rec_start_us = esp_timer_get_time();
     app.PlaySound(Lang::Sounds::OGG_SUCCESS);
     ESP_LOGI(TAG, "開始錄音（暫存上限 %u KB）", (unsigned)(budget / 1024));
@@ -459,8 +461,8 @@ void ControlTask(void*) {
                 (bat >= 0 ? "　🔋" + std::to_string(bat) + "%" : "") + "\n\n按一下 BOOT 停止");
         }
         if (tick == 30) {                          // 30 秒後把螢幕調暗省電
-            auto* bl = Board::GetInstance().GetBacklight();
-            if (bl) { bl->SetBrightness(15, false); dimmed = 1; }
+            dimmed = 1;
+            RunOnMain([]() { auto* bl = Board::GetInstance().GetBacklight(); if (bl) bl->SetBrightness(15, false); });
         }
         if (!warned && used > buffer_budget * 8 / 10) {
             warned = true;
@@ -472,9 +474,9 @@ void ControlTask(void*) {
     state = kFinishing;
     Step("停止錄音");
     StopAudio();
-    app.PlaySound(Lang::Sounds::OGG_POPUP);
+    Step("停止：顯示結果");
+    Status("錄音結束");
     int64_t sec = (rec_end_us - rec_start_us) / 1000000;
-    Status("");
     Say((last_error.empty() ? "⏹ 錄音結束 " : "⏹ " + last_error + "\n錄音 ") + Mmss(sec) + "\n正在把剩下的資料傳完…（傳完前不要關機）");
     vTaskDelete(nullptr);
 }

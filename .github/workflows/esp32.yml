@@ -55,13 +55,14 @@ jobs:
           mkdir -p out
           cp xiaozhi/build/merged-binary.bin "out/TiaoTiao-v${V}-merged.bin"
           cp xiaozhi/build/xiaozhi.bin "out/TiaoTiao-v${V}-app.bin"
+          cp xiaozhi/build/xiaozhi.elf "out/TiaoTiao-v${V}.elf"      # 當機時把序列埠的 Backtrace 對回原始碼用
           echo "version=${V}" >> "$GITHUB_OUTPUT"
           ls -la out
 
       - uses: actions/upload-artifact@v4
         with:
           name: TiaoTiao-v${{ steps.fw.outputs.version }}
-          path: out/*.bin
+          path: out/*
 
       - name: 建立 Release
         uses: softprops/action-gh-release@v2
@@ -69,7 +70,7 @@ jobs:
           tag_name: tiaotiao-v${{ steps.fw.outputs.version }}
           name: 跳跳韌體 v${{ steps.fw.outputs.version }}
           prerelease: true
-          files: out/*.bin
+          files: out/*
           body: |
             跳跳（微雪 ESP32-S3-Touch-AMOLED-1.8 V2）＝小智開源韌體＋YTmate 錄音。
             燒錄：Chrome／Edge 打開 https://espressif.github.io/esptool-js/ → Connect → Flash Address 0x0 → 選 TiaoTiao-v${{ steps.fw.outputs.version }}-merged.bin → Program。
