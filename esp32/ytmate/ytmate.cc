@@ -71,6 +71,8 @@ TaskHandle_t enc_task = nullptr, up_task = nullptr;
 OggOpusWriter* ogg = nullptr;
 int dimmed = 0;
 std::atomic<bool> enc_busy{false};      // 寫檔工作還沒把這次錄音收尾
+std::atomic<bool> need_repair{false};   // v1.0.7：伺服器不接受金鑰（401／403）→ 等使用者長按 BOOT 重新配對，配好接著上傳
+std::string up_note;                    // v1.0.7：上傳狀態（錄音中、錄音結束後都顯示在螢幕上）
 SemaphoreHandle_t audio_done = nullptr;
 
 // 2026-10-27 v1.0.2：跳跳在錄音開始時重開機 → 記下「做到哪一步」（重開機後保留），下次開機顯示在螢幕上，方便回報
@@ -177,8 +179,8 @@ std::string JStr(const std::string& body, const char* key) {
 }
 
 // 配對：跟電視同一套（/api/tv/pair/start → 手機核准 → poll 拿到裝置金鑰），kind＝esp32 只能上傳錄音
-bool Pair() {
-    state = kPairing;
+bool Pair(bool set_state = true) {
+    if (set_state) state = kPairing;
     std::string body = std::string("{\"name\":\"") + YTMATE_DEVICE_NAME + "\",\"kind\":\"esp32\"}";
     Resp r = Request("POST", "/api/tv/pair/start", std::move(body), "application/json", false);
     if (r.status != 200) {
@@ -274,11 +276,30 @@ void RunOnMain(std::function<void()> fn) {
 }
 
 // ── 上傳：有網路就把分塊依序 PUT 上去；全部傳完＋錄音結束 → finish ─────────────
-bool CreateOnServer() {
+// v1.0.7：上傳失敗的原因寫在螢幕上（v1.0.6 以前失敗只會默默重試，看起來像卡住）
+void UpFail(const char* what, const Resp& r, int wait_s) {
+    std::string why;
+    if (r.status < 0) why = "連不到伺服器（網路？）";
+    else {
+        std::string e = JStr(r.body, "error");
+        why = "HTTP " + std::to_string(r.status) + (e.empty() ? "" : "：" + e);
+    }
+    if (r.status == 401 || r.status == 403) {
+        need_repair = true;
+        up_note = std::string("⚠️ ") + what + "被伺服器拒絕（" + why + "）\n"
+                  "可能是：① 伺服器還沒更新到最新版 ② 跳跳的配對被取消，或是用舊版配對的。\n"
+                  "請確認伺服器已更新，然後長按 BOOT 重新配對（錄音還在，配好會接著上傳，不要關機）";
+    } else {
+        up_note = std::string("⚠️ ") + what + "失敗（" + why + "），" + std::to_string(wait_s) + " 秒後自動重試";
+    }
+    ESP_LOGW(TAG, "%s", up_note.c_str());
+    if (state == kFinishing) Say("⏹ 錄音已停止，還沒傳完\n" + up_note);
+}
+
+bool CreateOnServer(int wait_s) {
     std::string body = "{\"filename\":\"跳跳錄音.ogg\",\"stream\":true,\"kind\":\"meeting\",\"lang\":\"zh\"}";
     Resp r = Request("POST", "/api/recorder/recordings", std::move(body), "application/json", true);
-    if (r.status == 401) { SetToken(""); last_error = "配對已失效，請重新配對"; return false; }
-    if (r.status != 200) return false;
+    if (r.status != 200) { UpFail("建立錄音", r, wait_s); return false; }
     std::lock_guard<std::mutex> lk(mu);
     rid = JStr(r.body, "id");
     return !rid.empty();
@@ -298,7 +319,11 @@ void UploaderTask(void*) {
         if (!have && enc_done) {
             Step("上傳收尾");
             if (rid.empty() && next_idx == 0) break;                 // 什麼都沒錄到
-            if (!WifiUp() || (rid.empty() && !CreateOnServer())) { vTaskDelay(pdMS_TO_TICKS(backoff * 1000)); continue; }
+            if (need_repair || !WifiUp() || (rid.empty() && !CreateOnServer(backoff))) {
+                if (!WifiUp() && state == kFinishing) Say("⏹ 錄音已停止，還沒傳完\n⚠️ 沒有網路，連上後自動上傳（不要關機）");
+                vTaskDelay(pdMS_TO_TICKS(backoff * 1000)); continue;
+            }
+            if (state == kFinishing) Say("⬆️ 全部傳完了，通知伺服器開始處理…");
             std::string b = "{\"chunks\":" + std::to_string(next_idx) + "}";
             Resp r = Request("POST", "/api/recorder/recordings/" + rid + "/finish", std::move(b), "application/json", true);
             if (r.status == 200) {
@@ -307,12 +332,15 @@ void UploaderTask(void*) {
                 Application::GetInstance().PlaySound(Lang::Sounds::OGG_SUCCESS);
                 break;
             }
+            UpFail("結束上傳", r, backoff);
             vTaskDelay(pdMS_TO_TICKS(backoff * 1000));
             backoff = backoff < 30 ? backoff * 2 : 30;
             continue;
         }
         if (!have) { vTaskDelay(pdMS_TO_TICKS(500)); continue; }
-        if (!WifiUp() || Token().empty() || (rid.empty() && !CreateOnServer())) {
+        if (need_repair || !WifiUp() || Token().empty() || (rid.empty() && !CreateOnServer(backoff))) {
+            if (!WifiUp()) up_note = "⚠️ 沒有網路，連上後自動上傳";
+            if (!WifiUp() && state == kFinishing) Say("⏹ 錄音已停止，還沒傳完\n" + up_note + "（不要關機）");
             vTaskDelay(pdMS_TO_TICKS(backoff * 1000));
             backoff = backoff < 30 ? backoff * 2 : 30;
             continue;
@@ -326,9 +354,10 @@ void UploaderTask(void*) {
             heap_caps_free(c.data);
             uploaded++;
             backoff = 2;
+            up_note = "";
+            if (state == kFinishing) Say("⏹ 錄音已停止，上傳中…\n已上傳 " + std::to_string(uploaded) + "／" + std::to_string(next_idx + (cur.data ? 1 : 0)) + " 塊");
         } else {
-            if (r.status == 401) { SetToken(""); last_error = "配對已失效"; }
-            ESP_LOGW(TAG, "第 %d 塊上傳失敗（%d），%d 秒後重試", c.idx, r.status, backoff);
+            UpFail(("第 " + std::to_string(c.idx + 1) + " 塊上傳").c_str(), r, backoff);
             vTaskDelay(pdMS_TO_TICKS(backoff * 1000));
             backoff = backoff < 30 ? backoff * 2 : 30;
         }
@@ -434,7 +463,7 @@ void ControlTask(void*) {
                                        : "⚠️ 沒有網路：暫存中，還可以錄約 " + std::to_string((int)((buffer_budget > used ? buffer_budget - used : 0) / (kBitrate / 8) / 60)) + " 分鐘";
             int bat = Battery();
             Say("🔴 錄音中 " + Mmss(sec) + "\n" + net + "\n已上傳 " + std::to_string(up) + "／" + std::to_string(total) + " 塊" +
-                (bat >= 0 ? "　🔋" + std::to_string(bat) + "%" : "") + "\n\n按一下 BOOT 停止");
+                (bat >= 0 ? "　🔋" + std::to_string(bat) + "%" : "") + (up_note.empty() ? "" : "\n" + up_note) + "\n\n按一下 BOOT 停止");
         }
         if (tick == 30) {                          // 30 秒後把螢幕調暗省電
             dimmed = 1;
@@ -462,7 +491,20 @@ void ControlTask(void*) {
 bool IsBusy() { return state != kIdle; }
 bool IsRecording() { return state == kCountdown || state == kRecording || state == kPairing; }
 
+// v1.0.7：上傳被拒絕（401／403）時，長按 BOOT 重新配對；錄音資料還在記憶體裡，配好就接著上傳
+void RepairTask(void*) {
+    if (Pair(false)) {
+        need_repair = false;
+        Say("✅ 重新配對完成，接著上傳…");
+    }
+    vTaskDelete(nullptr);
+}
+
 void OnBootLongPress() {
+    if (need_repair && (state == kFinishing || state == kRecording)) {
+        if (xTaskCreate(RepairTask, "ytm_pair", 8 * 1024, nullptr, 3, nullptr) != pdPASS) Say("記憶體不足，請稍後再長按一次");
+        return;
+    }
     if (state != kIdle) return;
     state = kPairing;    // 先佔住狀態，避免重複觸發
     if (xTaskCreate(ControlTask, "ytm_ctl", 8 * 1024, nullptr, 3, nullptr) != pdPASS) {
@@ -475,7 +517,11 @@ bool OnBootClick() {
     int s = state;
     if (s == kRecording) { stop_req = true; return true; }
     if (s == kCountdown || s == kPairing) { cancel_req = true; return true; }
-    if (s == kFinishing) { Say("還在把錄音傳完，請稍候…"); return true; }
+    if (s == kFinishing) {
+        Say("⏹ 錄音已停止，還在上傳：已上傳 " + std::to_string(uploaded) + "／" + std::to_string(next_idx) + " 塊" +
+            (up_note.empty() ? "" : "\n" + up_note));
+        return true;
+    }
     return false;
 }
 
