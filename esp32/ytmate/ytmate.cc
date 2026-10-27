@@ -41,7 +41,7 @@ namespace {
 constexpr int kSampleRate = 16000;
 constexpr int kFrameSamples = 960;            // 60ms（跟小智的音訊流程一樣）
 constexpr int kBitrate = 24000;               // 小智編碼器（自動位元率）大約 16～24 kbps：用 24 kbps 估算可錄時長（保守）
-constexpr size_t kChunkBytes = 64 * 1024;     // 每塊約 26 秒
+constexpr size_t kChunkBytes = 32 * 1024;     // 每塊約 13～16 秒（v1.0.8：64→32 KB，網路慢時也看得到進度）
 constexpr size_t kReserveBytes = 1536 * 1024; // PSRAM 至少留給小智本身的空間
 constexpr size_t kMaxBufferBytes = 6 * 1024 * 1024;
 
@@ -300,14 +300,25 @@ bool CreateOnServer(int wait_s) {
     std::string body = "{\"filename\":\"跳跳錄音.ogg\",\"stream\":true,\"kind\":\"meeting\",\"lang\":\"zh\"}";
     Resp r = Request("POST", "/api/recorder/recordings", std::move(body), "application/json", true);
     if (r.status != 200) { UpFail("建立錄音", r, wait_s); return false; }
+    ESP_LOGI(TAG, "伺服器已建立錄音：%s", JStr(r.body, "id").c_str());
     std::lock_guard<std::mutex> lk(mu);
     rid = JStr(r.body, "id");
     return !rid.empty();
 }
 
+// v1.0.8：小智閒置時把 Wi-Fi 設成最省電（MAX_MODEM），連線要 8 秒、上傳 64 KB 慢到像卡住（序列埠記錄）。
+// 錄音／上傳期間關掉 Wi-Fi 省電，傳完再恢復。
+void WifiFast(bool on) {
+    wifi_ps_type_t ps = WIFI_PS_NONE;
+    if (esp_wifi_get_ps(&ps) != ESP_OK) return;
+    wifi_ps_type_t want = on ? WIFI_PS_NONE : WIFI_PS_MAX_MODEM;
+    if (ps != want) { esp_wifi_set_ps(want); ESP_LOGI(TAG, "Wi-Fi 省電：%s", on ? "關（上傳中）" : "開"); }
+}
+
 void UploaderTask(void*) {
     int backoff = 2;
     while (true) {
+        WifiFast(true);
         Check("上傳工作");
         Chunk c;
         bool have = false, enc_done = false;
@@ -325,7 +336,9 @@ void UploaderTask(void*) {
             }
             if (state == kFinishing) Say("⬆️ 全部傳完了，通知伺服器開始處理…");
             std::string b = "{\"chunks\":" + std::to_string(next_idx) + "}";
+            ESP_LOGI(TAG, "全部傳完（%d 塊），通知伺服器結束", next_idx);
             Resp r = Request("POST", "/api/recorder/recordings/" + rid + "/finish", std::move(b), "application/json", true);
+            ESP_LOGI(TAG, "結束：HTTP %d", r.status);
             if (r.status == 200) {
                 int64_t sec = (rec_end_us - rec_start_us) / 1000000;
                 Say("✅ 錄音 " + Mmss(sec) + " 已全部上傳。\nYTmate 正在轉文字和做摘要，完成後在「🎤 錄音」頻道。");
@@ -345,8 +358,11 @@ void UploaderTask(void*) {
             backoff = backoff < 30 ? backoff * 2 : 30;
             continue;
         }
+        ESP_LOGI(TAG, "上傳第 %d 塊（%u bytes）…", c.idx + 1, (unsigned)c.len);
+        int64_t t0 = esp_timer_get_time();
         Resp r = Request("PUT", "/api/recorder/recordings/" + rid + "/chunks/" + std::to_string(c.idx),
                          std::string((const char*)c.data, c.len), "application/octet-stream", true);
+        ESP_LOGI(TAG, "第 %d 塊結果 HTTP %d（%d 秒）", c.idx + 1, r.status, (int)((esp_timer_get_time() - t0) / 1000000));
         if (r.status == 200) {
             std::lock_guard<std::mutex> lk(mu);
             pending.pop_front();
@@ -368,6 +384,7 @@ void UploaderTask(void*) {
         pending.clear(); pending_bytes = 0;
         rid.clear();
     }
+    WifiFast(false);
     state = kIdle;
     Step("待命");
     up_task = nullptr;
