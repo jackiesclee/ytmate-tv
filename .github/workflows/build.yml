@@ -13,6 +13,8 @@ on:
     paths-ignore:            # 只改測試或說明文件時不重新發版
       - "e2e/**"
       - ".github/workflows/e2e.yml"
+      - "esp32/**"                     # 跳跳（ESP32）韌體另外編譯，見 esp32.yml
+      - ".github/workflows/esp32.yml"
       - "**.md"
   workflow_dispatch:
 
