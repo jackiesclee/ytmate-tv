@@ -35,11 +35,13 @@ patch("main/audio/audio_service.h", [
      "#define AS_EVENT_AUDIO_INPUT_STOP_REQUEST (1 << 4)\n#define AS_EVENT_RECORDING_RUNNING (1 << 5)   // YTmate：錄音中"),
     ("    void EnableDeviceAec(bool enable);",
      "    void EnableDeviceAec(bool enable);\n"
-     "    // YTmate：錄音（每 60ms 一段 16kHz 單聲道 PCM 交給 sink）\n"
+     "    // YTmate：錄音（麥克風 → 小智自己的 Opus 編碼器 → 每 60ms 一個封包交給 sink；在 Opus 工作裡呼叫，要很快返回）\n"
      "    void EnableRecording(bool enable);\n"
-     "    void SetRecordingSink(std::function<void(std::vector<int16_t>&&)> sink) { recording_sink_ = std::move(sink); }"),
+     "    void SetRecordingSink(std::function<void(std::vector<uint8_t>&&)> sink) { recording_sink_ = std::move(sink); }"),
+    ("    kAudioTaskTypeEncodeToTestingQueue,",
+     "    kAudioTaskTypeEncodeToTestingQueue,\n    kAudioTaskTypeEncodeToRecorder,   // YTmate 錄音"),
     ("    AudioServiceCallbacks callbacks_;",
-     "    AudioServiceCallbacks callbacks_;\n    std::function<void(std::vector<int16_t>&&)> recording_sink_;"),
+     "    AudioServiceCallbacks callbacks_;\n    std::function<void(std::vector<uint8_t>&&)> recording_sink_;"),
 ])
 patch("main/audio/audio_service.cc", [
     ("    constexpr EventBits_t kAudioInputActiveBits = AS_EVENT_AUDIO_TESTING_RUNNING |",
@@ -57,13 +59,16 @@ patch("main/audio/audio_service.cc", [
      "                    }\n"
      "                    data = std::move(mono_data);\n"
      "                }\n"
-     "                if (recording_sink_) {\n"
-     "                    recording_sink_(std::move(data));\n"
-     "                }\n"
+     "                PushTaskToEncodeQueue(kAudioTaskTypeEncodeToRecorder, std::move(data));\n"
      "                continue;\n"
      "            }\n"
      "        }\n\n"
      "        /* Used for audio testing in NetworkConfiguring mode by clicking the BOOT button */"),
+    ("                    debug_statistics_.encode_count++;",
+     "                    if (task.type == kAudioTaskTypeEncodeToRecorder && recording_sink_) {\n"
+     "                        recording_sink_(std::move(packet->payload));   // YTmate 錄音\n"
+     "                    }\n"
+     "                    debug_statistics_.encode_count++;"),
     ("void AudioService::EnableDeviceAec(bool enable) {",
      "void AudioService::EnableRecording(bool enable) {\n"
      "    ESP_LOGI(TAG, \"%s YTmate recording\", enable ? \"Enabling\" : \"Disabling\");\n"
@@ -125,10 +130,5 @@ patch(BOARD, [
      "        xTaskCreate(PowerButtonTask,"),
     ("        InitializeTools();\n    }",
      "        InitializeTools();\n        ytmate::Init();\n    }"),
-])
-# 6) 編譯設定：允許工作的堆疊放在 PSRAM（YTmate 的 Opus 編碼工作需要 32 KB 堆疊；內部記憶體不夠）
-patch("main/boards/waveshare/esp32-s3-touch-amoled-1.8-v2/config.json", [
-    ('"CONFIG_USE_WECHAT_MESSAGE_STYLE=y"',
-     '"CONFIG_USE_WECHAT_MESSAGE_STYLE=y",\n                "CONFIG_SPIRAM_ALLOW_STACK_EXTERNAL_MEMORY=y"'),
 ])
 print("🎉 YTmate 修改全部套用完成")

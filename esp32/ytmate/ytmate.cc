@@ -15,7 +15,6 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 #include <freertos/task.h>
-#include <freertos/idf_additions.h>
 #include <esp_attr.h>
 #include <esp_system.h>
 
@@ -23,7 +22,6 @@
 #include "assets/lang_config.h"
 #include "board.h"
 #include "display.h"
-#include "esp_opus_enc.h"
 #include "mcp_server.h"
 #include "settings.h"
 #include "ogg_opus_writer.h"
@@ -42,7 +40,7 @@ namespace {
 
 constexpr int kSampleRate = 16000;
 constexpr int kFrameSamples = 960;            // 60ms（跟小智的音訊流程一樣）
-constexpr int kBitrate = 20000;               // 20 kbps：語音清楚，一小時約 9 MB
+constexpr int kBitrate = 24000;               // 小智編碼器（自動位元率）大約 16～24 kbps：用 24 kbps 估算可錄時長（保守）
 constexpr size_t kChunkBytes = 64 * 1024;     // 每塊約 26 秒
 constexpr size_t kReserveBytes = 1536 * 1024; // PSRAM 至少留給小智本身的空間
 constexpr size_t kMaxBufferBytes = 6 * 1024 * 1024;
@@ -71,10 +69,8 @@ std::string last_error;
 QueueHandle_t pcm_q = nullptr;
 TaskHandle_t enc_task = nullptr, up_task = nullptr;
 OggOpusWriter* ogg = nullptr;
-void* opus = nullptr;
-int opus_in_bytes = 0, opus_out_bytes = 0;
 int dimmed = 0;
-std::atomic<bool> enc_busy{false};      // 編碼工作正在處理一次錄音
+std::atomic<bool> enc_busy{false};      // 寫檔工作還沒把這次錄音收尾
 SemaphoreHandle_t audio_done = nullptr;
 
 // 2026-10-27 v1.0.2：跳跳在錄音開始時重開機 → 記下「做到哪一步」（重開機後保留），下次開機顯示在螢幕上，方便回報
@@ -226,62 +222,31 @@ void SealChunk(bool force) {
     }
 }
 
-// 編碼工作：開機時建立一次、永遠不刪（Opus 編碼很吃堆疊，用 32 KB 的 PSRAM 堆疊；v1.0.1 用 16 KB 內部記憶體會當機）
-bool OpenEncoder() {
-    esp_opus_enc_config_t cfg = {};
-    cfg.sample_rate = ESP_AUDIO_SAMPLE_RATE_16K;
-    cfg.channel = ESP_AUDIO_MONO;
-    cfg.bits_per_sample = ESP_AUDIO_BIT16;
-    cfg.bitrate = kBitrate;
-    cfg.frame_duration = ESP_OPUS_ENC_FRAME_DURATION_60_MS;
-    cfg.application_mode = ESP_OPUS_ENC_APPLICATION_AUDIO;
-    cfg.complexity = 0;       // 跟小智一樣（省 CPU 與堆疊）
-    cfg.enable_fec = false;
-    cfg.enable_dtx = false;   // 檔案要連續時間軸，不省略靜音
-    cfg.enable_vbr = true;
-    if (esp_opus_enc_open(&cfg, sizeof(cfg), &opus) != ESP_AUDIO_ERR_OK || !opus) return false;
-    esp_opus_enc_get_frame_size(opus, &opus_in_bytes, &opus_out_bytes);
-    return true;
-}
+// 寫檔工作（v1.0.5）：Opus 編碼改用小智自己的編碼器（跟它的解碼器在同一個工作輪流做）。
+// v1.0.1～v1.0.4 另開一個 Opus 編碼器跟小智的解碼器同時跑，停止錄音時記憶體被寫壞而當機（序列埠記錄：heap 損毀）。
+// 這裡只收「已經編好的封包」→ 包成 Ogg → 切塊，工作很輕，開機時建立一次、永遠不刪。
+constexpr uint8_t kSilencePacket = 0x58;   // 編碼器省略靜音（DTX）時，補一個 60ms 的空封包（TOC：SILK 寬頻 60ms），時間軸才不會縮短
 
-void EncoderTask(void*) {
-    std::vector<uint8_t> out(1500);
+void WriterTask(void*) {
     while (true) {
-        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);           // 等 ControlTask 叫我開始
-        Step("開啟編碼器");
-        bool ok = OpenEncoder();
-        xSemaphoreGive(audio_done);                         // 回報開啟結果（ok 存在 opus 是否為空）
-        if (!ok) { enc_busy = false; continue; }
-        if (out.size() < (size_t)opus_out_bytes) out.resize(opus_out_bytes);
-        bool first = true;
-        while (true) {
-            std::vector<int16_t>* pcm = nullptr;
-            if (xQueueReceive(pcm_q, &pcm, pdMS_TO_TICKS(200)) == pdTRUE && pcm) {
-                if ((int)pcm->size() * 2 == opus_in_bytes) {
-                    if (first) Step("第一段聲音編碼");
-                    esp_audio_enc_in_frame_t in = {.buffer = (uint8_t*)pcm->data(), .len = (uint32_t)opus_in_bytes};
-                    esp_audio_enc_out_frame_t o = {.buffer = out.data(), .len = (uint32_t)out.size(), .encoded_bytes = 0};
-                    if (esp_opus_enc_process(opus, &in, &o) == ESP_AUDIO_ERR_OK && o.encoded_bytes > 0) {
-                        AppendBytes(ogg->AddPacket(out.data(), o.encoded_bytes));
-                        SealChunk(false);
-                    }
-                    if (first) { Step("錄音中"); first = false; }
-                }
-                delete pcm;
-                continue;
+        std::vector<uint8_t>* pkt = nullptr;
+        if (xQueueReceive(pcm_q, &pkt, pdMS_TO_TICKS(200)) == pdTRUE && pkt) {
+            if (ogg) {
+                if (pkt->empty()) AppendBytes(ogg->AddPacket(&kSilencePacket, 1));
+                else AppendBytes(ogg->AddPacket(pkt->data(), pkt->size()));
+                SealChunk(false);
             }
-            if (state == kFinishing && uxQueueMessagesWaiting(pcm_q) == 0) {
-                Step("編碼收尾：最後一頁");
-                if (ogg) { AppendBytes(ogg->Flush(true)); delete ogg; ogg = nullptr; }
-                Step("編碼收尾：最後一塊");
-                SealChunk(true);
-                Step("編碼收尾：關閉編碼器");
-                esp_opus_enc_close(opus); opus = nullptr;
-                Step("等待上傳");
-                break;
-            }
+            delete pkt;
+            continue;
         }
-        enc_busy = false;
+        if (state == kFinishing && enc_busy && uxQueueMessagesWaiting(pcm_q) == 0) {
+            Step("寫檔收尾：最後一頁");
+            if (ogg) { AppendBytes(ogg->Flush(true)); delete ogg; ogg = nullptr; }
+            Step("寫檔收尾：最後一塊");
+            SealChunk(true);
+            Step("等待上傳");
+            enc_busy = false;
+        }
     }
 }
 
@@ -362,10 +327,11 @@ void UploaderTask(void*) {
     vTaskDelete(nullptr);
 }
 
-void OnPcm(std::vector<int16_t>&& pcm) {
+// 在小智的 Opus 工作裡被呼叫：只把封包丟進佇列（越快返回越好）
+void OnPacket(std::vector<uint8_t>&& pkt) {
     if (state != kRecording || !pcm_q) return;
-    auto* p = new std::vector<int16_t>(std::move(pcm));
-    if (xQueueSend(pcm_q, &p, 0) != pdTRUE) delete p;      // 編碼來不及（極少見）就丟掉這 60ms
+    auto* p = new std::vector<uint8_t>(std::move(pkt));
+    if (xQueueSend(pcm_q, &p, 0) != pdTRUE) delete p;
 }
 
 std::string Prompt(size_t budget) {
@@ -413,7 +379,7 @@ void ControlTask(void*) {
     }
     if (cancel_req) { Say("已取消錄音"); state = kIdle; vTaskDelete(nullptr); return; }
 
-    // 開編碼器（在編碼工作裡開，堆疊夠大）與 Ogg
+    // Ogg 檔頭（Opus 編碼由小智的編碼器做）
     if (!enc_task) { Say("錄音工作沒有建立成功（記憶體不足），請重新開機再試"); state = kIdle; vTaskDelete(nullptr); return; }
     {
         std::lock_guard<std::mutex> lk(mu);
@@ -422,15 +388,6 @@ void ControlTask(void*) {
     ogg = new OggOpusWriter(kSampleRate, 2880, (uint32_t)esp_timer_get_time());
     AppendBytes(ogg->Header());
     enc_busy = true;
-    xSemaphoreTake(audio_done, 0);
-    xTaskNotifyGive(enc_task);
-    xSemaphoreTake(audio_done, pdMS_TO_TICKS(3000));
-    if (!opus) {
-        Say("錄音編碼器啟動失敗，請重新開機再試");
-        enc_busy = false; delete ogg; ogg = nullptr;
-        { std::lock_guard<std::mutex> lk(mu); if (cur.data) heap_caps_free(cur.data); cur = Chunk(); }
-        state = kIdle; vTaskDelete(nullptr); return;
-    }
     Step("建立上傳工作");
     if (!up_task) xTaskCreate(UploaderTask, "ytm_up", 10 * 1024, nullptr, 2, &up_task);
     if (!up_task) ESP_LOGE(TAG, "建立上傳工作失敗（記憶體不足），錄音先存著");
@@ -513,14 +470,10 @@ std::string StatusText() {
 }
 
 void Init() {
-    Application::GetInstance().GetAudioService().SetRecordingSink(OnPcm);
+    Application::GetInstance().GetAudioService().SetRecordingSink(OnPacket);
     audio_done = xSemaphoreCreateBinary();
-    pcm_q = xQueueCreate(32, sizeof(void*));
-    // 編碼工作：32 KB 堆疊放 PSRAM（只做運算、不碰快閃記憶體）；PSRAM 不行再用內部記憶體 24 KB
-    if (xTaskCreatePinnedToCoreWithCaps(EncoderTask, "ytm_enc", 32 * 1024, nullptr, 3, &enc_task, 1, MALLOC_CAP_SPIRAM) != pdPASS) {
-        enc_task = nullptr;
-        if (xTaskCreate(EncoderTask, "ytm_enc", 24 * 1024, nullptr, 3, &enc_task) != pdPASS) enc_task = nullptr;
-    }
+    pcm_q = xQueueCreate(64, sizeof(void*));
+    if (xTaskCreate(WriterTask, "ytm_wr", 6 * 1024, nullptr, 3, &enc_task) != pdPASS) enc_task = nullptr;
     // 上次在錄音途中重開機 → 告訴使用者停在哪一步
     esp_reset_reason_t why = esp_reset_reason();
     if (g_step_magic == 0x59544D41 && why != ESP_RST_POWERON && why != ESP_RST_SW && strcmp(g_step, "待命") != 0) {
