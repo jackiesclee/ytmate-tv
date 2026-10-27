@@ -1,19 +1,24 @@
-// 跳跳（YTmate 韌體 v1）：錄音 → 邊錄邊上傳到 YTmate 的「🎤 錄音」頻道（轉文字、AI 摘要照伺服器現有流程）。
+// 跳跳（YTmate 韌體 v2）：頻道播放終端（只播聲音）。
 //
-// 操作：
-//   - 長按 BOOT（約 1 秒）：開始錄音。螢幕先提示「可錄時長」與電量，3 秒倒數（倒數中按一下 BOOT＝取消）。
-//   - 錄音中按一下 BOOT：停止錄音（剩下的資料傳完後，伺服器自動轉文字與摘要）。
-//   - 也可以對小智說「開始錄音」「停止錄音」（裝置端 MCP 工具 self.ytmate.*）。
-//   - 第一次用：螢幕顯示 6 位數配對碼，到 YTmate 網頁的 📺 配對頁輸入（跟電視配對同一頁）。
-// 沒有 microSD 卡：錄音先暫存在 PSRAM，有網路就邊錄邊傳；斷網時最多撐「暫存區大小」的時間（螢幕會顯示）。
+// 2026-10-28 跟使用者討論後定案：錄音功能移除（偶爾停止後黑屏；錄音改用手機 App），改做「頻道播放」：
+//   - 跳跳跟電視一樣出現在 YTmate 手機遙控頁、小智的電視清單：選頻道／影片在跳跳播、暫停、上下一支、快轉、音量。
+//   - 伺服器把 mp3 轉成 Ogg/Opus，跳跳用小智內建的「通知播放器」串流播放（不用在板子上解 mp3）。
+//   - 播放中說「你好小智」可以對話；對話結束自動從剛才的位置接著播。
+// 按鍵：
+//   - BOOT 單擊：播放中＝暫停／繼續（沒有在播時照原本小智的行為：開始對話）。
+//   - BOOT 雙擊：下一支。
+//   - BOOT 長按：停止播放；還沒配對時＝開始配對（螢幕顯示 6 位數配對碼，到 YTmate 網頁「📺 電視配對」頁輸入）。
 #pragma once
+#include <cstdint>
 #include <string>
 
 namespace ytmate {
 void Init();                 // 板子建構式最後呼叫：註冊 MCP 工具、開背景工作
-bool IsBusy();               // 倒數／錄音中／還有資料沒傳完（不能進入省電關機）
-bool IsRecording();          // 倒數或錄音中（BOOT 單擊＝停止）
-void OnBootLongPress();      // 開始錄音
-bool OnBootClick();          // 錄音中／倒數中：停止或取消並回傳 true；其他情況回傳 false（照原本的小智行為）
+bool IsBusy();               // 正在開始播放（不能進入省電關機）
+bool OnBootClick();          // 有播放清單時：暫停／繼續並回傳 true；否則 false（照原本小智的行為）
+bool OnBootDoubleClick();    // 有播放清單時：下一支
+void OnBootLongPress();      // 停止播放／開始配對
+void OnProgress(uint32_t playback_id, uint32_t media_position_ms);   // 小智播放器回報播放位置（主工作）
+void OnPlayFinished(uint32_t playback_id, bool success);             // 小智播放器播完一支（主工作）
 std::string StatusText();
 }  // namespace ytmate

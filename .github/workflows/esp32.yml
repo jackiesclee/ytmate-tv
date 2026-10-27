@@ -1,6 +1,6 @@
-# 跳跳（ESP32-S3-Touch-AMOLED-1.8 V2）韌體：小智開源韌體（esp32/XIAOZHI_VERSION）＋ YTmate 錄音功能（esp32/ytmate、esp32/apply_patch.py）
+# 跳跳（ESP32-S3-Touch-AMOLED-1.8 V2）韌體：小智開源韌體（esp32/XIAOZHI_VERSION）＋ YTmate 頻道播放（esp32/ytmate、esp32/apply_patch.py）
 # 每次推送 esp32/ 底下的檔案（或在 Actions 頁面手動按 Run workflow）自動編譯，
-# 完成後在 Releases 的「tiaotiao-v1.0.N」下載 TiaoTiao-v1.0.N-merged.bin，用網頁燒錄工具燒到位址 0x0。
+# 完成後在 Releases 的「tiaotiao-v2.0.N」下載 TiaoTiao-v2.0.N-merged.bin，用網頁燒錄工具燒到位址 0x0。
 # 不含任何密碼：配對後的裝置金鑰只存在板子裡。
 name: Build TiaoTiao firmware
 
@@ -25,12 +25,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Ogg 封裝單元測試（不需要板子）
-        run: |
-          apt-get update -qq && apt-get install -y -qq libopus-dev ffmpeg >/dev/null
-          g++ -O1 -std=c++17 -Iesp32/ytmate esp32/tests/ogg_test.cc esp32/ytmate/ogg_opus_writer.cc -lopus -o /tmp/ogg_test
-          cd /tmp && ./ogg_test && ffprobe -v error -show_entries format=duration -of csv=p=0 out.ogg && ffmpeg -v error -i out.ogg -f null - && echo "Ogg OK"
-
       - name: 下載小智原始碼並套用 YTmate 修改
         run: |
           XV=$(cat esp32/XIAOZHI_VERSION)
@@ -51,7 +45,7 @@ jobs:
         id: fw
         shell: bash
         run: |
-          V="1.0.${GITHUB_RUN_NUMBER}"
+          V="2.0.${GITHUB_RUN_NUMBER}"            # v2＝頻道播放（v1.0.x 是已移除的錄音版）
           mkdir -p out
           cp xiaozhi/build/merged-binary.bin "out/TiaoTiao-v${V}-merged.bin"
           cp xiaozhi/build/xiaozhi.bin "out/TiaoTiao-v${V}-app.bin"
@@ -72,6 +66,6 @@ jobs:
           prerelease: true
           files: out/*
           body: |
-            跳跳（微雪 ESP32-S3-Touch-AMOLED-1.8 V2）＝小智開源韌體＋YTmate 錄音。
+            跳跳（微雪 ESP32-S3-Touch-AMOLED-1.8 V2）＝小智開源韌體＋YTmate 頻道播放（只播聲音）。
             燒錄：Chrome／Edge 打開 https://espressif.github.io/esptool-js/ → Connect → Flash Address 0x0 → 選 TiaoTiao-v${{ steps.fw.outputs.version }}-merged.bin → Program。
             （-app.bin 是之後自動更新用的，不用手動燒。）

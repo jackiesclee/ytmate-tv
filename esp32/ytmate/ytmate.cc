@@ -1,22 +1,19 @@
-// 跳跳（YTmate 韌體 v1）：錄音＋邊錄邊上傳。說明見 ytmate.h、esp32/README.md。
+// 跳跳（YTmate 韌體 v2）：頻道播放終端。說明見 ytmate.h、esp32/README.md。
 #include "ytmate.h"
 
 #include <atomic>
+#include <cstdlib>
 #include <cstring>
-#include <deque>
 #include <mutex>
 #include <vector>
 
 #include <cJSON.h>
-#include <esp_heap_caps.h>
 #include <esp_log.h>
 #include <esp_timer.h>
 #include <esp_wifi.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 #include <freertos/task.h>
-#include <esp_attr.h>
-#include <esp_system.h>
 
 #include "application.h"
 #include "assets/lang_config.h"
@@ -24,7 +21,6 @@
 #include "display.h"
 #include "mcp_server.h"
 #include "settings.h"
-#include "ogg_opus_writer.h"
 
 #ifndef YTMATE_SERVER_URL
 #define YTMATE_SERVER_URL "https://music.iucat.net"
@@ -32,72 +28,33 @@
 #ifndef YTMATE_DEVICE_NAME
 #define YTMATE_DEVICE_NAME "跳跳"
 #endif
+#define YTMATE_FW_VERSION "跳跳 2.0"
 
 #define TAG "YTmate"
 
 namespace ytmate {
 namespace {
 
-constexpr int kSampleRate = 16000;
-constexpr int kFrameSamples = 960;            // 60ms（跟小智的音訊流程一樣）
-constexpr int kBitrate = 24000;               // 小智編碼器（自動位元率）大約 16～24 kbps：用 24 kbps 估算可錄時長（保守）
-constexpr size_t kChunkBytes = 32 * 1024;     // 每塊約 13～16 秒（v1.0.8：64→32 KB，網路慢時也看得到進度）
-constexpr size_t kReserveBytes = 1536 * 1024; // PSRAM 至少留給小智本身的空間
-constexpr size_t kMaxBufferBytes = 6 * 1024 * 1024;
-
-enum State { kIdle, kPairing, kCountdown, kRecording, kFinishing };
-
-struct Chunk {
-    uint8_t* data = nullptr;
-    size_t len = 0;
-    int idx = 0;
+struct Item {
+    std::string vid, title, channel, url;
+    int dur = 0;
 };
 
+enum PState { kStopped, kStarting, kPlaying, kPaused, kInterrupted };
+
 std::mutex mu;
-std::atomic<int> state{kIdle};
-std::deque<Chunk> pending;          // 還沒上傳的分塊（PSRAM）
-size_t pending_bytes = 0;
-size_t buffer_budget = 0;           // 這次錄音可用的暫存大小
-Chunk cur;                          // 正在累積的分塊
-size_t cur_cap = 0;
-int next_idx = 0;                   // 下一個分塊編號
-int uploaded = 0;                   // 已經上傳成功的塊數
-std::string rid;                    // 伺服器上的錄音 id
-int64_t rec_start_us = 0, rec_end_us = 0;
-std::atomic<bool> stop_req{false}, cancel_req{false};
-std::string last_error;
-QueueHandle_t pcm_q = nullptr;
-TaskHandle_t enc_task = nullptr, up_task = nullptr;
-OggOpusWriter* ogg = nullptr;
-int dimmed = 0;
-std::atomic<bool> enc_busy{false};      // 寫檔工作還沒把這次錄音收尾
-std::atomic<bool> need_repair{false};   // v1.0.7：伺服器不接受金鑰（401／403）→ 等使用者長按 BOOT 重新配對，配好接著上傳
-std::string up_note;                    // v1.0.7：上傳狀態（錄音中、錄音結束後都顯示在螢幕上）
-SemaphoreHandle_t audio_done = nullptr;
-
-// 2026-10-27 v1.0.2：跳跳在錄音開始時重開機 → 記下「做到哪一步」（重開機後保留），下次開機顯示在螢幕上，方便回報
-RTC_NOINIT_ATTR uint32_t g_step_magic;
-RTC_NOINIT_ATTR char g_step[48];
-// v1.0.6（除錯版）：每記一步之前先檢查內部記憶體有沒有被寫壞；壞了就記下「壞在哪一步之後」並停下（重開機後螢幕顯示）
-void Check(const char* where) {
-    if (!heap_caps_check_integrity(MALLOC_CAP_INTERNAL, true)) {
-        char buf[48];
-        snprintf(buf, sizeof buf, "記憶體壞：%s", where);
-        g_step_magic = 0x59544D41;
-        strncpy(g_step, buf, sizeof(g_step) - 1);
-        g_step[sizeof(g_step) - 1] = 0;
-        ESP_LOGE(TAG, "heap 損毀，發現於：%s（上一步：%s）", where, g_step);
-        abort();
-    }
-}
-
-void Step(const char* s) {
-    Check(g_step_magic == 0x59544D41 ? g_step : "開機");
-    g_step_magic = 0x59544D41;
-    strncpy(g_step, s, sizeof(g_step) - 1);
-    g_step[sizeof(g_step) - 1] = 0;
-    ESP_LOGI(TAG, "步驟：%s", s);
-}
+std::vector<Item> items;
+int cur = 0;
+std::atomic<int> pstate{kStopped};
+std::atomic<uint32_t> our_id{0};
+std::atomic<uint32_t> last_ms{0};
+std::atomic<int> offset_s{0};            // 這次串流是從第幾秒開始
+std::atomic<int> paused_pos{0};
+std::atomic<bool> finished{false}, finished_ok{false};
+std::atomic<bool> user_paused{false};    // 使用者自己按暫停（小智對話結束後不要自動接著播）
+QueueHandle_t cmd_q = nullptr;           // 遙控指令（std::string* JSON）／按鍵動作
+std::atomic<bool> pairing{false};
+std::atomic<int> auth_problem{0};        // 401／403：配對失效或身分不對
 
 // ── 小工具 ───────────────────────────────────────────────────────────────
 std::string Token() { Settings s("ytmate", false); return s.GetString("token"); }
@@ -108,17 +65,19 @@ bool WifiUp() {
     return esp_wifi_sta_get_ap_info(&ap) == ESP_OK;
 }
 
-int Battery(bool* charging = nullptr) {
-    int level = -1; bool ch = false, dis = false;
-    if (!Board::GetInstance().GetBatteryLevel(level, ch, dis)) level = -1;
-    if (charging) *charging = ch || !dis;
-    return level;
+// 小智閒置時 Wi-Fi 是最省電模式（連線要好幾秒）；播放期間關掉省電，停止後恢復
+void WifiFast(bool on) {
+    wifi_ps_type_t ps = WIFI_PS_NONE;
+    if (esp_wifi_get_ps(&ps) != ESP_OK) return;
+    wifi_ps_type_t want = on ? WIFI_PS_NONE : WIFI_PS_MAX_MODEM;
+    if (ps != want) esp_wifi_set_ps(want);
 }
 
-std::string Mmss(int64_t sec) {
+std::string Mmss(int sec) {
     char b[24];
-    if (sec >= 3600) snprintf(b, sizeof b, "%d:%02d:%02d", (int)(sec / 3600), (int)(sec / 60 % 60), (int)(sec % 60));
-    else snprintf(b, sizeof b, "%02d:%02d", (int)(sec / 60), (int)(sec % 60));
+    if (sec < 0) sec = 0;
+    if (sec >= 3600) snprintf(b, sizeof b, "%d:%02d:%02d", sec / 3600, sec / 60 % 60, sec % 60);
+    else snprintf(b, sizeof b, "%02d:%02d", sec / 60, sec % 60);
     return b;
 }
 
@@ -132,455 +91,553 @@ void Status(const std::string& text) {
     if (d) d->SetStatus(text.c_str());
 }
 
-int OfflineMinutes(size_t budget) { return (int)(budget / (kBitrate / 8) / 60); }
-
-size_t ComputeBudget() {
-    size_t free_ps = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
-    size_t b = free_ps > kReserveBytes ? free_ps - kReserveBytes : 0;
-    return b > kMaxBufferBytes ? kMaxBufferBytes : b;
+int Volume() {
+    auto* c = Board::GetInstance().GetAudioCodec();
+    return c ? c->output_volume() : 0;
 }
 
-// ── HTTP（用小智內建的網路物件，自動走 HTTPS）──────────────────────────────
+void SetVolume(int v) {
+    auto* c = Board::GetInstance().GetAudioCodec();
+    if (c) c->SetOutputVolume(v < 0 ? 0 : v > 100 ? 100 : v);
+}
+
+// ── HTTP ─────────────────────────────────────────────────────────────────
 struct Resp { int status = -1; std::string body; };
 
-Resp Request(const std::string& method, const std::string& path, std::string&& body, const char* ctype, bool auth) {
-    Check("連線前");
+Resp Request(const std::string& method, const std::string& path, std::string body, bool auth, int timeout_ms = 15000) {
     Resp r;
     auto* net = Board::GetInstance().GetNetwork();
     if (!net) return r;
     auto http = net->CreateHttp(5);
     if (!http) return r;
+    http->SetTimeout(timeout_ms);
     if (auth) http->SetHeader("Authorization", "Bearer " + Token());
-    if (ctype) http->SetHeader("Content-Type", ctype);
-    http->SetHeader("User-Agent", "YTmate-TiaoTiao/1");
+    if (!body.empty()) http->SetHeader("Content-Type", "application/json");
+    http->SetHeader("User-Agent", "YTmate-TiaoTiao/2");
     if (!body.empty() || method != "GET") http->SetContent(std::move(body));
     auto opened = http->Open(method, std::string(YTMATE_SERVER_URL) + path);
-    if (!opened) {
-        ESP_LOGW(TAG, "%s %s 連不上", method.c_str(), path.c_str());
-        return r;
-    }
+    if (!opened) return r;
     auto st = http->GetStatusCode();
     r.status = st ? *st : -1;
     r.body = http->ReadAll();
     http->Close();
-    Check(method == "PUT" ? "上傳一塊之後" : "連線之後");
+    if (auth && (r.status == 401 || r.status == 403)) auth_problem = r.status;
     return r;
 }
 
+std::string JStr(cJSON* o, const char* key) {
+    cJSON* v = o ? cJSON_GetObjectItem(o, key) : nullptr;
+    if (cJSON_IsString(v)) return v->valuestring;
+    if (cJSON_IsNumber(v)) return std::to_string((long long)v->valuedouble);
+    return "";
+}
+
 std::string JStr(const std::string& body, const char* key) {
-    std::string out;
     cJSON* j = cJSON_Parse(body.c_str());
-    if (!j) return out;
-    cJSON* v = cJSON_GetObjectItem(j, key);
-    if (cJSON_IsString(v)) out = v->valuestring;
-    else if (cJSON_IsNumber(v)) out = std::to_string((long long)v->valuedouble);
+    if (!j) return "";
+    std::string out = JStr(j, key);
     cJSON_Delete(j);
     return out;
 }
 
-// 配對：跟電視同一套（/api/tv/pair/start → 手機核准 → poll 拿到裝置金鑰），kind＝esp32 只能上傳錄音
-bool Pair(bool set_state = true) {
-    if (set_state) state = kPairing;
+// ── 配對（跟電視同一套；kind＝esp32）────────────────────────────────────────
+void PairTask(void*) {
     std::string body = std::string("{\"name\":\"") + YTMATE_DEVICE_NAME + "\",\"kind\":\"esp32\"}";
-    Resp r = Request("POST", "/api/tv/pair/start", std::move(body), "application/json", false);
+    Resp r = Request("POST", "/api/tv/pair/start", body, false);
     if (r.status != 200) {
-        Say("沒辦法連到 YTmate 伺服器，請確認 Wi-Fi 後再長按 BOOT 一次");
-        return false;
+        Say("沒辦法連到 YTmate 伺服器，請確認 Wi-Fi 後再長按 BOOT");
+        pairing = false;
+        vTaskDelete(nullptr);
+        return;
     }
     std::string pid = JStr(r.body, "pair_id"), ps = JStr(r.body, "poll_secret"), code = JStr(r.body, "code");
-    Say("第一次使用要先配對：\n配對碼 " + code + "\n到 YTmate 網頁的「📺 電視配對」頁輸入這組號碼（10 分鐘內有效）");
+    Say("🦘 跳跳配對\n配對碼 " + code + "\n到 YTmate 網頁的「📺 電視配對」頁輸入（10 分鐘內有效）");
     Application::GetInstance().PlaySound(Lang::Sounds::OGG_POPUP);
-    for (int i = 0; i < 200 && !cancel_req; ++i) {
+    for (int i = 0; i < 200; ++i) {
         vTaskDelay(pdMS_TO_TICKS(3000));
-        std::string b = "{\"pair_id\":\"" + pid + "\",\"poll_secret\":\"" + ps + "\"}";
-        Resp p = Request("POST", "/api/tv/pair/poll", std::move(b), "application/json", false);
+        Resp p = Request("POST", "/api/tv/pair/poll", "{\"pair_id\":\"" + pid + "\",\"poll_secret\":\"" + ps + "\"}", false);
         if (p.status != 200) continue;
         std::string st = JStr(p.body, "status");
         if (st == "approved") {
             SetToken(JStr(p.body, "token"));
-            Say("✅ 配對完成！");
+            auth_problem = 0;
+            Say("✅ 配對完成！\n用 YTmate 手機遙控頁選「🦘 跳跳」播放，或對小智說「在跳跳播海峽早安新聞」");
             Application::GetInstance().PlaySound(Lang::Sounds::OGG_SUCCESS);
-            vTaskDelay(pdMS_TO_TICKS(1200));
-            return true;
+            pairing = false;
+            vTaskDelete(nullptr);
+            return;
         }
         if (st == "expired") break;
     }
-    Say("配對碼過期了，請再長按 BOOT 重新開始");
-    return false;
-}
-
-// ── 錄音資料流：麥克風 PCM → Opus → Ogg → 分塊 ─────────────────────────────
-void AppendBytes(const std::string& bytes) {
-    if (bytes.empty()) return;
-    std::lock_guard<std::mutex> lk(mu);
-    if (!cur.data) {
-        cur_cap = kChunkBytes + 16 * 1024;
-        cur.data = (uint8_t*)heap_caps_malloc(cur_cap, MALLOC_CAP_SPIRAM);
-        cur.len = 0;
-        cur.idx = next_idx;
-    }
-    if (!cur.data) return;
-    if (cur.len + bytes.size() > cur_cap) {          // 很少發生：先把目前這塊收起來
-        pending.push_back(cur); pending_bytes += cur.len; next_idx++;
-        cur = Chunk();
-        cur_cap = kChunkBytes + 16 * 1024 > bytes.size() ? kChunkBytes + 16 * 1024 : bytes.size();
-        cur.data = (uint8_t*)heap_caps_malloc(cur_cap, MALLOC_CAP_SPIRAM);
-        cur.idx = next_idx;
-        if (!cur.data) return;
-    }
-    memcpy(cur.data + cur.len, bytes.data(), bytes.size());
-    cur.len += bytes.size();
-}
-
-void SealChunk(bool force) {
-    std::lock_guard<std::mutex> lk(mu);
-    if (cur.data && cur.len && (force || cur.len >= kChunkBytes)) {
-        pending.push_back(cur); pending_bytes += cur.len; next_idx++;
-        cur = Chunk();
-    }
-}
-
-// 寫檔工作（v1.0.5）：Opus 編碼改用小智自己的編碼器（跟它的解碼器在同一個工作輪流做）。
-// v1.0.1～v1.0.4 另開一個 Opus 編碼器跟小智的解碼器同時跑，停止錄音時記憶體被寫壞而當機（序列埠記錄：heap 損毀）。
-// 這裡只收「已經編好的封包」→ 包成 Ogg → 切塊，工作很輕，開機時建立一次、永遠不刪。
-constexpr uint8_t kSilencePacket = 0x58;   // 編碼器省略靜音（DTX）時，補一個 60ms 的空封包（TOC：SILK 寬頻 60ms），時間軸才不會縮短
-
-void WriterTask(void*) {
-    while (true) {
-        std::vector<uint8_t>* pkt = nullptr;
-        if (xQueueReceive(pcm_q, &pkt, pdMS_TO_TICKS(200)) == pdTRUE && pkt) {
-            if (ogg) {
-                if (pkt->empty()) AppendBytes(ogg->AddPacket(&kSilencePacket, 1));
-                else AppendBytes(ogg->AddPacket(pkt->data(), pkt->size()));
-                SealChunk(false);
-                if (ogg->granule() % (2880 * 50) == 0) Check("寫檔（每 3 秒）");
-            }
-            delete pkt;
-            continue;
-        }
-        if (state == kFinishing && enc_busy && uxQueueMessagesWaiting(pcm_q) == 0) {
-            Step("寫檔收尾：最後一頁");
-            if (ogg) { AppendBytes(ogg->Flush(true)); delete ogg; ogg = nullptr; }
-            Step("寫檔收尾：最後一塊");
-            SealChunk(true);
-            Step("等待上傳");
-            enc_busy = false;
-        }
-    }
-}
-
-// 小智的音訊開關要在主工作執行（從別的工作直接呼叫，喚醒詞引擎可能當機）
-void RunOnMain(std::function<void()> fn) {
-    Application::GetInstance().Schedule([fn]() { fn(); xSemaphoreGive(audio_done); });
-    xSemaphoreTake(audio_done, pdMS_TO_TICKS(3000));
-}
-
-// ── 上傳：有網路就把分塊依序 PUT 上去；全部傳完＋錄音結束 → finish ─────────────
-// v1.0.7：上傳失敗的原因寫在螢幕上（v1.0.6 以前失敗只會默默重試，看起來像卡住）
-void UpFail(const char* what, const Resp& r, int wait_s) {
-    std::string why;
-    if (r.status < 0) why = "連不到伺服器（網路？）";
-    else {
-        std::string e = JStr(r.body, "error");
-        why = "HTTP " + std::to_string(r.status) + (e.empty() ? "" : "：" + e);
-    }
-    if (r.status == 401 || r.status == 403) {
-        need_repair = true;
-        up_note = std::string("⚠️ ") + what + "被伺服器拒絕（" + why + "）\n"
-                  "可能是：① 伺服器還沒更新到最新版 ② 跳跳的配對被取消，或是用舊版配對的。\n"
-                  "請確認伺服器已更新，然後長按 BOOT 重新配對（錄音還在，配好會接著上傳，不要關機）";
-    } else {
-        up_note = std::string("⚠️ ") + what + "失敗（" + why + "），" + std::to_string(wait_s) + " 秒後自動重試";
-    }
-    ESP_LOGW(TAG, "%s", up_note.c_str());
-    if (state == kFinishing) Say("⏹ 錄音已停止，還沒傳完\n" + up_note);
-}
-
-bool CreateOnServer(int wait_s) {
-    std::string body = "{\"filename\":\"跳跳錄音.ogg\",\"stream\":true,\"kind\":\"meeting\",\"lang\":\"zh\"}";
-    Resp r = Request("POST", "/api/recorder/recordings", std::move(body), "application/json", true);
-    if (r.status != 200) { UpFail("建立錄音", r, wait_s); return false; }
-    ESP_LOGI(TAG, "伺服器已建立錄音：%s", JStr(r.body, "id").c_str());
-    std::lock_guard<std::mutex> lk(mu);
-    rid = JStr(r.body, "id");
-    return !rid.empty();
-}
-
-// v1.0.8：小智閒置時把 Wi-Fi 設成最省電（MAX_MODEM），連線要 8 秒、上傳 64 KB 慢到像卡住（序列埠記錄）。
-// 錄音／上傳期間關掉 Wi-Fi 省電，傳完再恢復。
-void WifiFast(bool on) {
-    wifi_ps_type_t ps = WIFI_PS_NONE;
-    if (esp_wifi_get_ps(&ps) != ESP_OK) return;
-    wifi_ps_type_t want = on ? WIFI_PS_NONE : WIFI_PS_MAX_MODEM;
-    if (ps != want) { esp_wifi_set_ps(want); ESP_LOGI(TAG, "Wi-Fi 省電：%s", on ? "關（上傳中）" : "開"); }
-}
-
-void UploaderTask(void*) {
-    int backoff = 2;
-    while (true) {
-        WifiFast(true);
-        Check("上傳工作");
-        Chunk c;
-        bool have = false, enc_done = false;
-        {
-            std::lock_guard<std::mutex> lk(mu);
-            if (!pending.empty()) { c = pending.front(); have = true; }
-            enc_done = (state == kFinishing && !enc_busy && !cur.data);
-        }
-        if (!have && enc_done) {
-            Step("上傳收尾");
-            if (rid.empty() && next_idx == 0) break;                 // 什麼都沒錄到
-            if (need_repair || !WifiUp() || (rid.empty() && !CreateOnServer(backoff))) {
-                if (!WifiUp() && state == kFinishing) Say("⏹ 錄音已停止，還沒傳完\n⚠️ 沒有網路，連上後自動上傳（不要關機）");
-                vTaskDelay(pdMS_TO_TICKS(backoff * 1000)); continue;
-            }
-            if (state == kFinishing) Say("⬆️ 全部傳完了，通知伺服器開始處理…");
-            std::string b = "{\"chunks\":" + std::to_string(next_idx) + "}";
-            ESP_LOGI(TAG, "全部傳完（%d 塊），通知伺服器結束", next_idx);
-            Resp r = Request("POST", "/api/recorder/recordings/" + rid + "/finish", std::move(b), "application/json", true);
-            ESP_LOGI(TAG, "結束：HTTP %d", r.status);
-            if (r.status == 200) {
-                int64_t sec = (rec_end_us - rec_start_us) / 1000000;
-                Say("✅ 錄音 " + Mmss(sec) + " 已全部上傳。\nYTmate 正在轉文字和做摘要，完成後在「🎤 錄音」頻道。");
-                Application::GetInstance().PlaySound(Lang::Sounds::OGG_SUCCESS);
-                break;
-            }
-            UpFail("結束上傳", r, backoff);
-            vTaskDelay(pdMS_TO_TICKS(backoff * 1000));
-            backoff = backoff < 30 ? backoff * 2 : 30;
-            continue;
-        }
-        if (!have) { vTaskDelay(pdMS_TO_TICKS(500)); continue; }
-        if (need_repair || !WifiUp() || Token().empty() || (rid.empty() && !CreateOnServer(backoff))) {
-            if (!WifiUp()) up_note = "⚠️ 沒有網路，連上後自動上傳";
-            if (!WifiUp() && state == kFinishing) Say("⏹ 錄音已停止，還沒傳完\n" + up_note + "（不要關機）");
-            vTaskDelay(pdMS_TO_TICKS(backoff * 1000));
-            backoff = backoff < 30 ? backoff * 2 : 30;
-            continue;
-        }
-        ESP_LOGI(TAG, "上傳第 %d 塊（%u bytes）…", c.idx + 1, (unsigned)c.len);
-        int64_t t0 = esp_timer_get_time();
-        Resp r = Request("PUT", "/api/recorder/recordings/" + rid + "/chunks/" + std::to_string(c.idx),
-                         std::string((const char*)c.data, c.len), "application/octet-stream", true);
-        ESP_LOGI(TAG, "第 %d 塊結果 HTTP %d（%d 秒）", c.idx + 1, r.status, (int)((esp_timer_get_time() - t0) / 1000000));
-        if (r.status == 200) {
-            std::lock_guard<std::mutex> lk(mu);
-            pending.pop_front();
-            pending_bytes -= c.len;
-            heap_caps_free(c.data);
-            uploaded++;
-            backoff = 2;
-            up_note = "";
-            if (state == kFinishing) Say("⏹ 錄音已停止，上傳中…\n已上傳 " + std::to_string(uploaded) + "／" + std::to_string(next_idx + (cur.data ? 1 : 0)) + " 塊");
-        } else {
-            UpFail(("第 " + std::to_string(c.idx + 1) + " 塊上傳").c_str(), r, backoff);
-            vTaskDelay(pdMS_TO_TICKS(backoff * 1000));
-            backoff = backoff < 30 ? backoff * 2 : 30;
-        }
-    }
-    {
-        std::lock_guard<std::mutex> lk(mu);
-        for (auto& c : pending) heap_caps_free(c.data);
-        pending.clear(); pending_bytes = 0;
-        rid.clear();
-    }
-    WifiFast(false);
-    state = kIdle;
-    Step("待命");
-    up_task = nullptr;
+    Say("配對碼過期了，請再長按 BOOT 重新配對");
+    pairing = false;
     vTaskDelete(nullptr);
 }
 
-// 在小智的 Opus 工作裡被呼叫：只把封包丟進佇列（越快返回越好）
-void OnPacket(std::vector<uint8_t>&& pkt) {
-    if (state != kRecording || !pcm_q) return;
-    auto* p = new std::vector<uint8_t>(std::move(pkt));
-    if (xQueueSend(pcm_q, &p, 0) != pdTRUE) delete p;
+void StartPairing() {
+    if (pairing.exchange(true)) return;
+    if (xTaskCreate(PairTask, "ytm_pair", 6 * 1024, nullptr, 3, nullptr) != pdPASS) pairing = false;
 }
 
-std::string Prompt(size_t budget) {
-    bool ch = false;
-    int bat = Battery(&ch);
-    std::string s = WifiUp() ? "✅ 已連網：可以一直錄，邊錄邊上傳\n（斷網時最多暫存約 " + std::to_string(OfflineMinutes(budget)) + " 分鐘）"
-                             : "⚠️ 沒有網路：最多可錄約 " + std::to_string(OfflineMinutes(budget)) + " 分鐘\n（連上網路後自動上傳，上傳完成前不要關機）";
-    if (bat >= 0) s += "\n🔋 電量 " + std::to_string(bat) + "%" + (ch ? "（充電中）" : "");
-    return s;
+// ── 播放（都在 PlayerTask 裡執行）───────────────────────────────────────────
+int CurPos() {
+    int s = pstate;
+    if (s == kPlaying || s == kStarting) return offset_s + (int)(last_ms / 1000);
+    return paused_pos;
 }
 
-void StopAudio() {
-    // v1.0.4：只關掉錄音資料流；喚醒詞從頭到尾不動（錄音資料流優先，錄音時喚醒詞本來就收不到聲音）
-    Step("停止：關錄音資料流");
-    RunOnMain([]() { Application::GetInstance().GetAudioService().EnableRecording(false); });
-    Step("停止：恢復螢幕亮度");
-    if (dimmed) {
-        dimmed = 0;
-        RunOnMain([]() { auto* bl = Board::GetInstance().GetBacklight(); if (bl) bl->RestoreBrightness(); });
-    }
-    Step("停止：亮度恢復完成");
-}
+int Count() { std::lock_guard<std::mutex> lk(mu); return (int)items.size(); }
 
-// 背景控制流程：（配對）→ 等小智對話結束 → 提示＋倒數 → 錄音 → 監看 → 結束
-void ControlTask(void*) {
+bool WaitState(DeviceState want, int ms) {
     auto& app = Application::GetInstance();
-    cancel_req = false; stop_req = false; last_error.clear();
-    if (Token().empty()) {
-        if (!WifiUp()) { Say("第一次使用要先連上 Wi-Fi 配對 YTmate"); state = kIdle; vTaskDelete(nullptr); return; }
-        if (!Pair()) { state = kIdle; vTaskDelete(nullptr); return; }
-    }
-    // 小智還在對話中（例如用語音叫它開始錄音）：等它說完；還在聽就結束對話
-    bool toggled = false;
-    for (int i = 0; i < 300 && app.GetDeviceState() != kDeviceStateIdle; ++i) {
-        if (app.GetDeviceState() == kDeviceStateListening && !toggled && i > 10) { app.ToggleChatState(); toggled = true; }
+    for (int t = 0; t < ms; t += 100) {
+        if (app.GetDeviceState() == want) return true;
         vTaskDelay(pdMS_TO_TICKS(100));
     }
-    size_t budget = ComputeBudget();
-    if (budget < 256 * 1024) { Say("記憶體不足，沒辦法錄音（請重新開機再試）"); state = kIdle; vTaskDelete(nullptr); return; }
-    state = kCountdown;
-    app.PlaySound(Lang::Sounds::OGG_POPUP);
-    for (int s = 3; s > 0 && !cancel_req; --s) {
-        Say("🎙️ 準備錄音（" + std::to_string(s) + "）\n" + Prompt(budget) + "\n\n按一下 BOOT 取消");
-        vTaskDelay(pdMS_TO_TICKS(1000));
-    }
-    if (cancel_req) { Say("已取消錄音"); state = kIdle; vTaskDelete(nullptr); return; }
+    return app.GetDeviceState() == want;
+}
 
-    // Ogg 檔頭（Opus 編碼由小智的編碼器做）
-    if (!enc_task) { Say("錄音工作沒有建立成功（記憶體不足），請重新開機再試"); state = kIdle; vTaskDelete(nullptr); return; }
+void StopStream() {
+    auto& app = Application::GetInstance();
+    our_id = 0;
+    if (app.GetDeviceState() == kDeviceStateNotifying) {
+        app.YtmateStopUrl();
+        WaitState(kDeviceStateIdle, 3000);
+    }
+}
+
+void ShowNow() {
+    std::string s;
     {
         std::lock_guard<std::mutex> lk(mu);
-        buffer_budget = budget; next_idx = 0; uploaded = 0; rid.clear(); pending_bytes = 0; cur = Chunk();
+        if (cur < 0 || cur >= (int)items.size()) return;
+        const Item& it = items[cur];
+        s = (pstate == kPaused ? "⏸ " : "▶ ") + it.title;
+        if (!it.channel.empty() || items.size() > 1)
+            s += "\n" + it.channel + (items.size() > 1 ? "　" + std::to_string(cur + 1) + "／" + std::to_string(items.size()) : "");
     }
-    ogg = new OggOpusWriter(kSampleRate, 2880, (uint32_t)esp_timer_get_time());
-    AppendBytes(ogg->Header());
-    enc_busy = true;
-    Step("建立上傳工作");
-    if (!up_task) xTaskCreate(UploaderTask, "ytm_up", 10 * 1024, nullptr, 2, &up_task);
-    if (!up_task) ESP_LOGE(TAG, "建立上傳工作失敗（記憶體不足），錄音先存著");
+    if (pstate == kPaused) s += "\n\n按一下 BOOT 繼續";
+    Say(s);
+}
 
-    Step("打開麥克風");
-    state = kRecording;                       // 先設好，麥克風一來就收
-    RunOnMain([]() { Application::GetInstance().GetAudioService().EnableRecording(true); });   // 錄音資料流優先：錄音時聽不到「你好小智」
-    rec_start_us = esp_timer_get_time();
-    app.PlaySound(Lang::Sounds::OGG_SUCCESS);
-    ESP_LOGI(TAG, "開始錄音（暫存上限 %u KB）", (unsigned)(budget / 1024));
-
-    // 監看：每秒更新畫面；暫存快滿就提醒，滿了自動停止
-    bool warned = false;
-    int tick = 0;
-    while (!stop_req) {
-        vTaskDelay(pdMS_TO_TICKS(1000));
-        tick++;
-        Check("錄音中（每秒檢查）");
-        int64_t sec = (esp_timer_get_time() - rec_start_us) / 1000000;
-        size_t used;
-        int up, total;
-        { std::lock_guard<std::mutex> lk(mu); used = pending_bytes + cur.len; up = uploaded; total = next_idx; }
-        Status("🔴 錄音中 " + Mmss(sec));
-        if (tick % 2 == 0) {
-            std::string net = WifiUp() ? (used < 2 * kChunkBytes ? "☁️ 即時上傳中" : "☁️ 上傳中（暫存 " + std::to_string(used / 1024) + " KB）")
-                                       : "⚠️ 沒有網路：暫存中，還可以錄約 " + std::to_string((int)((buffer_budget > used ? buffer_budget - used : 0) / (kBitrate / 8) / 60)) + " 分鐘";
-            int bat = Battery();
-            Say("🔴 錄音中 " + Mmss(sec) + "\n" + net + "\n已上傳 " + std::to_string(up) + "／" + std::to_string(total) + " 塊" +
-                (bat >= 0 ? "　🔋" + std::to_string(bat) + "%" : "") + (up_note.empty() ? "" : "\n" + up_note) + "\n\n按一下 BOOT 停止");
-        }
-        if (tick == 30) {                          // 30 秒後把螢幕調暗省電
-            dimmed = 1;
-            RunOnMain([]() { auto* bl = Board::GetInstance().GetBacklight(); if (bl) bl->SetBrightness(15, false); });
-        }
-        if (!warned && used > buffer_budget * 8 / 10) {
-            warned = true;
-            app.PlaySound(Lang::Sounds::OGG_EXCLAMATION);
-        }
-        if (used >= buffer_budget) { last_error = "暫存區滿了（太久沒有網路），已自動停止錄音"; break; }
+// 從第 pos 秒開始播第 i 支
+bool PlayAt(int i, int pos) {
+    std::string url;
+    if (pos < 0) pos = 0;
+    {
+        std::lock_guard<std::mutex> lk(mu);
+        if (i < 0 || i >= (int)items.size()) return false;
+        cur = i;
+        url = std::string(YTMATE_SERVER_URL) + items[i].url + "&s=" + std::to_string(pos);
     }
-    rec_end_us = esp_timer_get_time();
-    state = kFinishing;
-    Step("停止錄音");
-    StopAudio();
-    Step("停止：顯示結果");
-    Status("錄音結束");
-    int64_t sec = (rec_end_us - rec_start_us) / 1000000;
-    Say((last_error.empty() ? "⏹ 錄音結束 " : "⏹ " + last_error + "\n錄音 ") + Mmss(sec) + "\n正在把剩下的資料傳完…（傳完前不要關機）");
-    vTaskDelete(nullptr);
+    pstate = kStarting;
+    StopStream();
+    auto& app = Application::GetInstance();
+    if (!WaitState(kDeviceStateIdle, 8000)) {          // 小智還在對話：先記著，對話結束再播
+        paused_pos = pos;
+        pstate = kInterrupted;
+        return false;
+    }
+    WifiFast(true);
+    offset_s = pos;
+    last_ms = 0;
+    finished = false;
+    user_paused = false;
+    ESP_LOGI(TAG, "播放第 %d 支（從 %d 秒）", i + 1, pos);
+    app.YtmatePlayUrl(url);
+    if (!WaitState(kDeviceStateNotifying, 6000)) {
+        paused_pos = pos;
+        pstate = kPaused;
+        Say("⚠️ 播放沒有開始（跳跳正忙或網路問題），按一下 BOOT 再試");
+        return false;
+    }
+    our_id = app.YtmatePlaybackId();
+    pstate = kPlaying;
+    ShowNow();
+    return true;
+}
+
+void Pause(bool by_user) {
+    int s = pstate;
+    if (s == kInterrupted) { pstate = kPaused; user_paused = by_user; ShowNow(); return; }
+    if (s != kPlaying && s != kStarting) return;
+    paused_pos = CurPos();
+    pstate = kPaused;
+    user_paused = by_user;
+    StopStream();
+    ShowNow();
+}
+
+void Resume() {
+    int s = pstate;
+    if (s == kPaused || s == kInterrupted) PlayAt(cur, paused_pos);
+}
+
+void StopAll() {
+    StopStream();
+    {
+        std::lock_guard<std::mutex> lk(mu);
+        items.clear();
+        cur = 0;
+    }
+    pstate = kStopped;
+    paused_pos = 0;
+    WifiFast(false);
+    Status("");
+    Say("⏹ 已停止播放");
+}
+
+// ── 跟伺服器同步 ───────────────────────────────────────────────────────────
+void ReportResume(bool done) {
+    std::string vid;
+    int dur = 0;
+    {
+        std::lock_guard<std::mutex> lk(mu);
+        if (cur < 0 || cur >= (int)items.size()) return;
+        vid = items[cur].vid;
+        dur = items[cur].dur;
+    }
+    int pos = done ? dur : CurPos();
+    if (!done && pos < 10) return;
+    Request("POST", "/api/resume/" + vid, "{\"pos\":" + std::to_string(pos) + ",\"dur\":" + std::to_string(dur) +
+            ",\"done\":" + (done ? "true" : "false") + "}", true);
+}
+
+void ReportState() {
+    cJSON* st = cJSON_CreateObject();
+    {
+        std::lock_guard<std::mutex> lk(mu);
+        bool has = cur >= 0 && cur < (int)items.size();
+        int s = pstate;
+        cJSON_AddStringToObject(st, "screen", has ? "player" : "home");
+        cJSON_AddBoolToObject(st, "playing", s == kPlaying || s == kStarting);
+        cJSON_AddBoolToObject(st, "paused", s == kPaused || s == kInterrupted);
+        if (has) {
+            cJSON_AddStringToObject(st, "video_id", items[cur].vid.c_str());
+            cJSON_AddStringToObject(st, "title", items[cur].title.c_str());
+            cJSON_AddStringToObject(st, "channel", items[cur].channel.c_str());
+            cJSON_AddNumberToObject(st, "dur", items[cur].dur);
+            cJSON_AddNumberToObject(st, "index", cur);
+            cJSON_AddNumberToObject(st, "count", (double)items.size());
+        }
+    }
+    cJSON_AddNumberToObject(st, "pos", CurPos());
+    cJSON_AddNumberToObject(st, "volume", Volume());
+    cJSON_AddNumberToObject(st, "volume_max", 100);
+    cJSON_AddBoolToObject(st, "muted", Volume() == 0);
+    cJSON_AddStringToObject(st, "version", YTMATE_FW_VERSION);
+    cJSON* root = cJSON_CreateObject();
+    cJSON_AddItemToObject(root, "state", st);
+    char* s = cJSON_PrintUnformatted(root);
+    std::string body = s ? s : "{}";
+    if (s) cJSON_free(s);
+    cJSON_Delete(root);
+    Request("POST", "/api/remote/state", body, true);
+}
+
+void Ack(const std::string& id, bool ok, const std::string& msg) {
+    cJSON* r = cJSON_CreateObject();
+    cJSON* arr = cJSON_AddArrayToObject(r, "results");
+    cJSON* o = cJSON_CreateObject();
+    cJSON_AddStringToObject(o, "id", id.c_str());
+    cJSON_AddBoolToObject(o, "ok", ok);
+    cJSON_AddStringToObject(o, "msg", msg.c_str());
+    cJSON_AddItemToArray(arr, o);
+    char* s = cJSON_PrintUnformatted(r);
+    std::string body = s ? s : "{}";
+    if (s) cJSON_free(s);
+    cJSON_Delete(r);
+    Request("POST", "/api/remote/ack", body, true);
+}
+
+// 伺服器回傳的播放清單 → 開始播
+bool LoadList(const std::string& body, std::string& msg) {
+    cJSON* j = cJSON_Parse(body.c_str());
+    if (!j) { msg = "播放清單格式不對"; return false; }
+    std::vector<Item> list;
+    cJSON* arr = cJSON_GetObjectItem(j, "items");
+    cJSON* it = nullptr;
+    cJSON_ArrayForEach(it, arr) {
+        Item x;
+        x.vid = JStr(it, "video_id");
+        x.title = JStr(it, "title");
+        x.channel = JStr(it, "channel");
+        x.url = JStr(it, "url");
+        x.dur = atoi(JStr(it, "duration").c_str());
+        if (!x.url.empty()) list.push_back(std::move(x));
+    }
+    int start_pos = atoi(JStr(j, "start_pos").c_str());
+    cJSON_Delete(j);
+    if (list.empty()) { msg = "沒有可以播的影片"; return false; }
+    StopStream();
+    std::string first = list[0].title;
+    {
+        std::lock_guard<std::mutex> lk(mu);
+        items = std::move(list);
+        cur = 0;
+    }
+    if (!PlayAt(0, start_pos)) { msg = "跳跳正忙，對話結束後開始播"; return true; }
+    msg = "跳跳開始播放：" + first + (start_pos > 0 ? "（從 " + Mmss(start_pos) + " 接著播）" : "");
+    return true;
+}
+
+void Next() {
+    if (cur + 1 < Count()) { ReportResume(false); PlayAt(cur + 1, 0); }
+}
+
+void HandleCmd(const std::string& json) {
+    // 按鍵（本機）
+    if (json == "key:toggle") { if (pstate == kPlaying || pstate == kStarting) Pause(true); else Resume(); ReportState(); return; }
+    if (json == "key:next") { if (cur + 1 < Count()) Next(); else Say("已經是最後一支"); ReportState(); return; }
+    if (json == "key:stop") { ReportResume(false); StopAll(); ReportState(); return; }
+    // 遙控指令（伺服器）
+    cJSON* c = cJSON_Parse(json.c_str());
+    if (!c) return;
+    std::string id = JStr(c, "id"), type = JStr(c, "type");
+    cJSON* args = cJSON_GetObjectItem(c, "args");
+    bool ok = true;
+    std::string msg = "完成";
+    bool has = Count() > 0;
+    if (type == "play") {
+        char* a = args ? cJSON_PrintUnformatted(args) : nullptr;
+        std::string ab = a ? a : "{}";
+        if (a) cJSON_free(a);
+        Resp r = Request("POST", "/api/esp32/resolve", ab, true, 30000);
+        if (r.status == 200) ok = LoadList(r.body, msg);
+        else {
+            ok = false;
+            msg = JStr(r.body, "error");
+            if (msg.empty()) msg = "拿不到播放清單（HTTP " + std::to_string(r.status) + "）";
+        }
+    } else if (type == "control") {
+        std::string act = JStr(args, "action"), val = JStr(args, "value");
+        if (act == "toggle") {
+            if (pstate == kPlaying) { Pause(true); msg = "⏸ 暫停"; }
+            else if (has) { Resume(); msg = "▶ 播放"; }
+            else { ok = false; msg = "目前沒有在播放"; }
+        } else if (act == "pause") { Pause(true); msg = "⏸ 暫停"; }
+        else if (act == "resume") {
+            if (has) { Resume(); msg = "▶ 播放"; } else { ok = false; msg = "目前沒有在播放"; }
+        } else if (act == "next") {
+            if (cur + 1 < Count()) { Next(); msg = "下一支"; } else { ok = false; msg = "已經是最後一支"; }
+        } else if (act == "prev") {
+            if (!has) { ok = false; msg = "目前沒有在播放"; }
+            else { PlayAt(CurPos() > 5 || cur == 0 ? cur : cur - 1, 0); msg = "上一支／從頭播放"; }
+        } else if (act == "stop") { ReportResume(false); StopAll(); msg = "已停止"; }
+        else if (act == "seek_rel" || act == "seek_abs") {
+            if (!has) { ok = false; msg = "目前沒有在播放"; }
+            else {
+                int v = atoi(val.c_str());
+                int target = act == "seek_rel" ? CurPos() + v : v;
+                if (target < 0) target = 0;
+                PlayAt(cur, target);
+                msg = act == "seek_rel" ? std::string(v >= 0 ? "快轉 " : "倒退 ") + std::to_string(v >= 0 ? v : -v) + " 秒"
+                                        : "跳到 " + Mmss(target);
+            }
+        } else if (act == "volume_up") { SetVolume(Volume() + 10); msg = "音量 " + std::to_string(Volume()); }
+        else if (act == "volume_down") { SetVolume(Volume() - 10); msg = "音量 " + std::to_string(Volume()); }
+        else if (act == "volume_set") { SetVolume(atoi(val.c_str())); msg = "音量 " + std::to_string(Volume()); }
+        else if (act == "mute") { SetVolume(Volume() > 0 ? 0 : 60); msg = Volume() ? "取消靜音" : "🔇 靜音"; }
+        else { ok = false; msg = "跳跳只播聲音，不支援這個操作"; }
+    } else if (type == "toast") {
+        std::string t = JStr(args, "text");
+        if (!t.empty() && pstate != kPlaying) Say(t);
+    } else {
+        ok = false;
+        msg = "跳跳不認得這個指令，請更新韌體";
+    }
+    cJSON_Delete(c);
+    if (!id.empty()) Ack(id, ok, msg);
+    ReportState();
+}
+
+void Enqueue(const std::string& s) {
+    if (!cmd_q) return;
+    auto* p = new std::string(s);
+    if (xQueueSend(cmd_q, &p, 0) != pdTRUE) delete p;
+}
+
+// 長輪詢：向伺服器領遙控指令（跟電視 App 一樣）
+void PollTask(void*) {
+    int backoff = 2;
+    bool told = false;
+    while (true) {
+        if (Token().empty() || pairing || !WifiUp()) { vTaskDelay(pdMS_TO_TICKS(3000)); continue; }
+        if (auth_problem) {
+            if (!told) {
+                told = true;
+                Say(auth_problem == 401 ? "⚠️ 跳跳的配對被取消了，長按 BOOT 重新配對"
+                                        : "⚠️ 跳跳是用舊版韌體配對的（被當成電視或錄音裝置）。\n請到「📺 電視配對」頁取消這筆「跳跳」，再長按 BOOT 重新配對");
+            }
+            vTaskDelay(pdMS_TO_TICKS(15000));
+            auth_problem = 0;           // 15 秒後再試（使用者可能已經重新配對）
+            continue;
+        }
+        Resp r = Request("GET", "/api/remote/poll?wait=20", "", true, 30000);
+        if (r.status != 200) {
+            vTaskDelay(pdMS_TO_TICKS(backoff * 1000));
+            backoff = backoff < 30 ? backoff * 2 : 30;
+            continue;
+        }
+        backoff = 2;
+        told = false;
+        cJSON* j = cJSON_Parse(r.body.c_str());
+        cJSON* cmds = j ? cJSON_GetObjectItem(j, "cmds") : nullptr;
+        cJSON* c = nullptr;
+        cJSON_ArrayForEach(c, cmds) {
+            char* s = cJSON_PrintUnformatted(c);
+            if (s) { Enqueue(s); cJSON_free(s); }
+        }
+        if (j) cJSON_Delete(j);
+    }
+}
+
+// 播放控制：處理指令與按鍵、播完接下一支、小智對話打斷後接著播、定時回報狀態
+void PlayerTask(void*) {
+    auto& app = Application::GetInstance();
+    int64_t last_report = 0, last_resume = 0, last_status = 0, idle_since = 0;
+    bool reported_idle = false;
+    while (true) {
+        std::string* cmd = nullptr;
+        if (xQueueReceive(cmd_q, &cmd, pdMS_TO_TICKS(250)) == pdTRUE && cmd) {
+            HandleCmd(*cmd);
+            delete cmd;
+            last_report = esp_timer_get_time();
+            continue;
+        }
+        int64_t now = esp_timer_get_time();
+        DeviceState ds = app.GetDeviceState();
+        // 播完一支 → 下一支；整份清單播完 → 拿待播清單
+        if (finished.exchange(false)) {
+            if (finished_ok) {
+                ReportResume(true);
+                if (cur + 1 < Count()) PlayAt(cur + 1, 0);
+                else {
+                    Resp r = Request("POST", "/api/remote/queue/take", "{}", true);
+                    std::string m;
+                    if (!(r.status == 200 && r.body.find("\"url\"") != std::string::npos && LoadList(r.body, m))) {
+                        pstate = kStopped;
+                        { std::lock_guard<std::mutex> lk(mu); items.clear(); }
+                        WifiFast(false);
+                        Status("");
+                        Say("✅ 播完了");
+                    }
+                }
+            } else {
+                Say("⚠️ 這支播放失敗，跳到下一支");
+                if (cur + 1 < Count()) PlayAt(cur + 1, 0); else StopAll();
+            }
+            ReportState();
+            last_report = now;
+            continue;
+        }
+        // 播放中被打斷（說了「你好小智」、或其他通知）→ 記住位置；對話結束自動接著播
+        if (pstate == kPlaying && ds != kDeviceStateNotifying) {
+            paused_pos = CurPos();
+            pstate = kInterrupted;
+            our_id = 0;
+            idle_since = 0;
+            ESP_LOGI(TAG, "播放被打斷（狀態 %d），停在 %d 秒", (int)ds, (int)paused_pos);
+        }
+        if (pstate == kInterrupted) {
+            if (ds == kDeviceStateIdle) {
+                if (!idle_since) idle_since = now;
+                if (now - idle_since > 1500000 && !user_paused) { Resume(); ReportState(); last_report = now; }
+            } else idle_since = 0;
+        }
+        if (pstate == kPlaying && now - last_status > 3000000) {
+            last_status = now;
+            int dur = 0;
+            { std::lock_guard<std::mutex> lk(mu); if (cur < (int)items.size()) dur = items[cur].dur; }
+            Status("▶ " + Mmss(CurPos()) + (dur ? " / " + Mmss(dur) : ""));
+        }
+        if (pstate == kPlaying && now - last_resume > 15000000) { last_resume = now; ReportResume(false); }
+        bool active = pstate != kStopped;
+        if (WifiUp() && !Token().empty() && (now - last_report > (active ? 10000000 : 60000000) || (!active && !reported_idle))) {
+            last_report = now;
+            reported_idle = !active;
+            ReportState();
+        }
+        if (active) reported_idle = false;
+    }
 }
 
 }  // namespace
 
-bool IsBusy() { return state != kIdle; }
-bool IsRecording() { return state == kCountdown || state == kRecording || state == kPairing; }
+bool IsBusy() { return pstate == kStarting; }
 
-// v1.0.7：上傳被拒絕（401／403）時，長按 BOOT 重新配對；錄音資料還在記憶體裡，配好就接著上傳
-void RepairTask(void*) {
-    if (Pair(false)) {
-        need_repair = false;
-        Say("✅ 重新配對完成，接著上傳…");
-    }
-    vTaskDelete(nullptr);
+bool OnBootClick() {
+    if (pstate == kStopped) return false;
+    Enqueue("key:toggle");
+    return true;
+}
+
+bool OnBootDoubleClick() {
+    if (pstate == kStopped) return false;
+    Enqueue("key:next");
+    return true;
 }
 
 void OnBootLongPress() {
-    if (need_repair && (state == kFinishing || state == kRecording)) {
-        if (xTaskCreate(RepairTask, "ytm_pair", 8 * 1024, nullptr, 3, nullptr) != pdPASS) Say("記憶體不足，請稍後再長按一次");
-        return;
-    }
-    if (state != kIdle) return;
-    state = kPairing;    // 先佔住狀態，避免重複觸發
-    if (xTaskCreate(ControlTask, "ytm_ctl", 8 * 1024, nullptr, 3, nullptr) != pdPASS) {
-        state = kIdle;
-        Say("記憶體不足，沒辦法開始錄音");
-    }
+    if (pstate != kStopped) { Enqueue("key:stop"); return; }
+    static int64_t last = 0;
+    int64_t now = esp_timer_get_time();
+    if (Token().empty() || auth_problem || now - last < 10000000) { StartPairing(); return; }   // 10 秒內長按兩次＝重新配對
+    last = now;
+    Say("🦘 跳跳待命中\n用 YTmate 手機遙控頁選「🦘 跳跳」播放，或對小智說「在跳跳播海峽早安新聞」\n（要重新配對：10 秒內再長按一次 BOOT）");
 }
 
-bool OnBootClick() {
-    int s = state;
-    if (s == kRecording) { stop_req = true; return true; }
-    if (s == kCountdown || s == kPairing) { cancel_req = true; return true; }
-    if (s == kFinishing) {
-        Say("⏹ 錄音已停止，還在上傳：已上傳 " + std::to_string(uploaded) + "／" + std::to_string(next_idx) + " 塊" +
-            (up_note.empty() ? "" : "\n" + up_note));
-        return true;
-    }
-    return false;
+void OnProgress(uint32_t playback_id, uint32_t media_position_ms) {
+    if (playback_id && playback_id == our_id) last_ms = media_position_ms;
+}
+
+void OnPlayFinished(uint32_t playback_id, bool success) {
+    if (!playback_id || playback_id != our_id) return;
+    our_id = 0;
+    finished_ok = success;
+    pstate = kStarting;     // 讓 PlayerTask 不要誤判成「被打斷」
+    finished = true;
 }
 
 std::string StatusText() {
-    int s = state;
-    if (s == kRecording) return "錄音中 " + Mmss((esp_timer_get_time() - rec_start_us) / 1000000);
-    if (s == kFinishing) return "錄音結束，還在上傳";
-    if (s == kCountdown) return "準備開始錄音";
-    if (s == kPairing) return "等待配對";
-    return Token().empty() ? "還沒配對 YTmate" : "待命（長按 BOOT 開始錄音）";
+    int s = pstate;
+    std::lock_guard<std::mutex> lk(mu);
+    if (s == kStopped || items.empty()) return Token().empty() ? "還沒配對 YTmate（長按 BOOT 配對）" : "待命，沒有在播放";
+    std::string t = items[cur].title + "（第 " + std::to_string(cur + 1) + "／" + std::to_string(items.size()) + " 支）";
+    return (s == kPlaying ? "正在播：" : "暫停中：") + t;
 }
 
 void Init() {
-    Application::GetInstance().GetAudioService().SetRecordingSink(OnPacket);
-    audio_done = xSemaphoreCreateBinary();
-    pcm_q = xQueueCreate(64, sizeof(void*));
-    if (xTaskCreate(WriterTask, "ytm_wr", 6 * 1024, nullptr, 3, &enc_task) != pdPASS) enc_task = nullptr;
-    // 上次在錄音途中重開機 → 告訴使用者停在哪一步
-    esp_reset_reason_t why = esp_reset_reason();
-    if (g_step_magic == 0x59544D41 && why != ESP_RST_POWERON && why != ESP_RST_SW && strcmp(g_step, "待命") != 0) {
-        static char msg[160];
-        snprintf(msg, sizeof msg, "⚠️ 上次錄音時重開機了（停在：%s，原因代碼 %d）。請截圖給 YTmate。", g_step, (int)why);
-        xTaskCreate([](void*) { vTaskDelay(pdMS_TO_TICKS(8000)); Say(msg); vTaskDelete(nullptr); }, "ytm_msg", 4096, nullptr, 1, nullptr);
-    }
-    Step("待命");
+    cmd_q = xQueueCreate(8, sizeof(void*));
+    xTaskCreate(PollTask, "ytm_poll", 6 * 1024, nullptr, 2, nullptr);
+    xTaskCreate(PlayerTask, "ytm_play", 8 * 1024, nullptr, 3, nullptr);
     auto& mcp = McpServer::GetInstance();
-    mcp.AddTool("self.ytmate.start_recording",
-        "開始錄音（會議、上課、筆記），錄音邊錄邊上傳到 YTmate 的錄音頻道，伺服器會自動轉文字和做摘要。"
-        "使用者說「開始錄音」「幫我錄音」時呼叫。錄音期間聽不到喚醒詞，要停止請使用者按一下 BOOT 鍵。",
+    mcp.AddTool("self.ytmate.player_status",
+        "查詢跳跳現在在播 YTmate 的什麼（片名、第幾支、是否暫停）。",
+        PropertyList(), [](const PropertyList&) -> ToolResult { return ReturnValue(StatusText()); });
+    mcp.AddTool("self.ytmate.pause",
+        "暫停跳跳正在播的 YTmate 節目（使用者說「暫停」「先停一下」時呼叫；之後按一下 BOOT 繼續）。",
         PropertyList(), [](const PropertyList&) -> ToolResult {
-            if (state != kIdle) return ReturnValue(std::string("已經在錄音或處理中：") + StatusText());
-            OnBootLongPress();
-            return ReturnValue(std::string("好，對話結束後會先顯示可錄時長並倒數 3 秒開始錄音；要停止請按一下 BOOT 鍵。"));
+            if (pstate == kStopped) return ReturnValue(std::string("目前沒有在播放"));
+            user_paused = true;
+            if (pstate == kInterrupted) pstate = kPaused;
+            return ReturnValue(std::string("好，已暫停；要繼續時按一下 BOOT"));
         });
-    mcp.AddTool("self.ytmate.recording_status",
-        "查詢 YTmate 錄音狀態（是否在錄音、錄了多久、是否還在上傳、可錄時長）。",
+    mcp.AddTool("self.ytmate.next",
+        "跳跳播下一支 YTmate 節目（使用者說「下一個」「下一首」時呼叫）。",
         PropertyList(), [](const PropertyList&) -> ToolResult {
-            std::string s = StatusText();
-            if (state == kIdle) s += "；" + Prompt(ComputeBudget());
-            return ReturnValue(s);
+            if (pstate == kStopped) return ReturnValue(std::string("目前沒有在播放"));
+            if (cur + 1 >= Count()) return ReturnValue(std::string("已經是最後一支"));
+            {
+                std::lock_guard<std::mutex> lk(mu);
+                cur = cur + 1;
+            }
+            paused_pos = 0;                          // 對話結束後從下一支開頭接著播
+            pstate = kInterrupted;
+            user_paused = false;
+            return ReturnValue(std::string("好，對話結束後播下一支"));
         });
-    ESP_LOGI(TAG, "YTmate 錄音功能已啟用（伺服器 %s）", YTMATE_SERVER_URL);
+    ESP_LOGI(TAG, "YTmate 播放功能已啟用（伺服器 %s）", YTMATE_SERVER_URL);
 }
 
 }  // namespace ytmate
