@@ -76,7 +76,21 @@ SemaphoreHandle_t audio_done = nullptr;
 // 2026-10-27 v1.0.2：跳跳在錄音開始時重開機 → 記下「做到哪一步」（重開機後保留），下次開機顯示在螢幕上，方便回報
 RTC_NOINIT_ATTR uint32_t g_step_magic;
 RTC_NOINIT_ATTR char g_step[48];
+// v1.0.6（除錯版）：每記一步之前先檢查內部記憶體有沒有被寫壞；壞了就記下「壞在哪一步之後」並停下（重開機後螢幕顯示）
+void Check(const char* where) {
+    if (!heap_caps_check_integrity(MALLOC_CAP_INTERNAL, true)) {
+        char buf[48];
+        snprintf(buf, sizeof buf, "記憶體壞：%s", where);
+        g_step_magic = 0x59544D41;
+        strncpy(g_step, buf, sizeof(g_step) - 1);
+        g_step[sizeof(g_step) - 1] = 0;
+        ESP_LOGE(TAG, "heap 損毀，發現於：%s（上一步：%s）", where, g_step);
+        abort();
+    }
+}
+
 void Step(const char* s) {
+    Check(g_step_magic == 0x59544D41 ? g_step : "開機");
     g_step_magic = 0x59544D41;
     strncpy(g_step, s, sizeof(g_step) - 1);
     g_step[sizeof(g_step) - 1] = 0;
@@ -128,6 +142,7 @@ size_t ComputeBudget() {
 struct Resp { int status = -1; std::string body; };
 
 Resp Request(const std::string& method, const std::string& path, std::string&& body, const char* ctype, bool auth) {
+    Check("連線前");
     Resp r;
     auto* net = Board::GetInstance().GetNetwork();
     if (!net) return r;
@@ -146,6 +161,7 @@ Resp Request(const std::string& method, const std::string& path, std::string&& b
     r.status = st ? *st : -1;
     r.body = http->ReadAll();
     http->Close();
+    Check(method == "PUT" ? "上傳一塊之後" : "連線之後");
     return r;
 }
 
@@ -235,6 +251,7 @@ void WriterTask(void*) {
                 if (pkt->empty()) AppendBytes(ogg->AddPacket(&kSilencePacket, 1));
                 else AppendBytes(ogg->AddPacket(pkt->data(), pkt->size()));
                 SealChunk(false);
+                if (ogg->granule() % (2880 * 50) == 0) Check("寫檔（每 3 秒）");
             }
             delete pkt;
             continue;
@@ -270,6 +287,7 @@ bool CreateOnServer() {
 void UploaderTask(void*) {
     int backoff = 2;
     while (true) {
+        Check("上傳工作");
         Chunk c;
         bool have = false, enc_done = false;
         {
@@ -405,6 +423,7 @@ void ControlTask(void*) {
     while (!stop_req) {
         vTaskDelay(pdMS_TO_TICKS(1000));
         tick++;
+        Check("錄音中（每秒檢查）");
         int64_t sec = (esp_timer_get_time() - rec_start_us) / 1000000;
         size_t used;
         int up, total;
