@@ -7,6 +7,7 @@ on:
     branches: [main]
     paths:
       - "mobile/**"
+      - "!mobile/**.md"                # 只改說明文件不重新編譯
       - ".github/workflows/mobile.yml"
   workflow_dispatch:
 

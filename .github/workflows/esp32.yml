@@ -9,6 +9,7 @@ on:
     branches: [main]
     paths:
       - "esp32/**"
+      - "!esp32/**.md"                # 只改說明文件不重新編譯
       - ".github/workflows/esp32.yml"
   workflow_dispatch:
 
