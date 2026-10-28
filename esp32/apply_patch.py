@@ -5,7 +5,7 @@
 
 v2（2026-10-28）：錄音功能移除，改成「頻道播放」——用小智內建的通知播放器（Ogg/Opus 串流）播 YTmate 的節目。
 不再修改音訊服務（v1 的錄音資料流整段拿掉），只加：
-  - Application 的三個公開方法（播放網址、停止、目前播放編號）＋播放進度／播完通知給 YTmate；
+  - Application 的公開方法（播放網址、停止、目前播放編號、結束對話〔v2.1〕）＋播放進度／播完通知給 YTmate；
   - BOOT 單擊（暫停／繼續）、雙擊（下一支）、長按（停止／配對）；
   - 不自動安裝官方韌體。"""
 import os
@@ -42,7 +42,9 @@ patch("main/application.h", [
      "    // YTmate（跳跳）：用通知播放器串流播放 Ogg/Opus 網址；停止；目前的播放編號（播放進度、播完通知用）\n"
      "    void YtmatePlayUrl(const std::string& url) { Schedule([this, url]() { StartNotification(url, {}); }); }\n"
      "    void YtmateStopUrl() { Schedule([this]() { if (GetDeviceState() == kDeviceStateNotifying) StopNotification(); }); }\n"
-     "    uint32_t YtmatePlaybackId() const { return notification_playback_id_; }"),
+     "    uint32_t YtmatePlaybackId() const { return notification_playback_id_; }\n"
+     "    // YTmate v2.1：對話中要求播放 → 小智說完後結束這次對話（跟聆聽中按一下 BOOT 一樣）\n"
+     "    void YtmateEndChat() { Schedule([this]() { if (GetDeviceState() == kDeviceStateListening && protocol_) protocol_->CloseAudioChannel(); }); }"),
 ])
 patch("main/application.cc", [
     ('#include <cstring>\n', '#include <cstring>\n#include "ytmate/ytmate.h"\n'),

@@ -4,6 +4,7 @@
 #include <atomic>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
 #include <mutex>
 #include <vector>
 
@@ -28,7 +29,7 @@
 #ifndef YTMATE_DEVICE_NAME
 #define YTMATE_DEVICE_NAME "跳跳"
 #endif
-#define YTMATE_FW_VERSION "跳跳 2.0"
+#define YTMATE_FW_VERSION "跳跳 2.1"
 
 #define TAG "YTmate"
 
@@ -55,6 +56,7 @@ std::atomic<bool> user_paused{false};    // 使用者自己按暫停（小智對
 QueueHandle_t cmd_q = nullptr;           // 遙控指令（std::string* JSON）／按鍵動作
 std::atomic<bool> pairing{false};
 std::atomic<int> auth_problem{0};        // 401／403：配對失效或身分不對
+std::atomic<bool> start_after_chat{false};  // v2.1：在對話中要求播放（遙控或語音）→ 小智說完就結束對話、開始播
 
 // ── 小工具 ───────────────────────────────────────────────────────────────
 std::string Token() { Settings s("ytmate", false); return s.GetString("token"); }
@@ -102,27 +104,59 @@ void SetVolume(int v) {
 }
 
 // ── HTTP ─────────────────────────────────────────────────────────────────
+// v2.1：每個工作各留一條連線重複使用（keep-alive）。以前每個請求都重新做 TLS 握手（每次約 2.6 秒、很吃 CPU），
+// 小智聽你說話時編碼器被擠到（序列埠一直出現「Encode queue is full」），而且很慢。
 struct Resp { int status = -1; std::string body; };
+struct Conn { std::unique_ptr<Http> http; };
+Conn poll_conn, main_conn;               // PollTask 用一條、PlayerTask 用一條（各自只在自己的工作裡用）
 
-Resp Request(const std::string& method, const std::string& path, std::string body, bool auth, int timeout_ms = 15000) {
+Resp RequestOnce(Conn* c, const std::string& method, const std::string& path, const std::string& body, bool auth,
+                 int timeout_ms, bool& reused) {
     Resp r;
+    reused = false;
     auto* net = Board::GetInstance().GetNetwork();
     if (!net) return r;
-    auto http = net->CreateHttp(5);
-    if (!http) return r;
+    std::unique_ptr<Http> tmp;
+    Http* http = nullptr;
+    if (c && c->http) { http = c->http.get(); reused = true; }
+    else {
+        tmp = net->CreateHttp(5);
+        if (!tmp) return r;
+        http = tmp.get();
+        http->SetKeepAlive(c != nullptr);
+    }
     http->SetTimeout(timeout_ms);
-    if (auth) http->SetHeader("Authorization", "Bearer " + Token());
-    if (!body.empty()) http->SetHeader("Content-Type", "application/json");
+    http->SetHeader("Authorization", auth ? "Bearer " + Token() : std::string());
+    http->SetHeader("Content-Type", "application/json");
     http->SetHeader("User-Agent", "YTmate-TiaoTiao/2");
-    if (!body.empty() || method != "GET") http->SetContent(std::move(body));
+    http->SetContent(std::string(body));
     auto opened = http->Open(method, std::string(YTMATE_SERVER_URL) + path);
-    if (!opened) return r;
-    auto st = http->GetStatusCode();
-    r.status = st ? *st : -1;
-    r.body = http->ReadAll();
-    http->Close();
+    bool good = false;
+    if (opened) {
+        auto st = http->GetStatusCode();
+        r.status = st ? *st : -1;
+        r.body = http->ReadAll();
+        good = r.status > 0;
+    }
+    if (c && good) {
+        if (tmp) c->http = std::move(tmp);          // 留著下次用（伺服器不支援 keep-alive 時，下次會自動重連）
+    } else {
+        http->Close();
+        if (c) c->http.reset();
+    }
+    return r;
+}
+
+Resp Request(Conn* c, const std::string& method, const std::string& path, std::string body, bool auth, int timeout_ms = 15000) {
+    bool reused = false;
+    Resp r = RequestOnce(c, method, path, body, auth, timeout_ms, reused);
+    if (r.status <= 0 && reused) r = RequestOnce(c, method, path, body, auth, timeout_ms, reused);   // 舊連線被伺服器關掉了：重連一次
     if (auth && (r.status == 401 || r.status == 403)) auth_problem = r.status;
     return r;
+}
+
+Resp Request(const std::string& method, const std::string& path, std::string body, bool auth, int timeout_ms = 15000) {
+    return Request(&main_conn, method, path, std::move(body), auth, timeout_ms);
 }
 
 std::string JStr(cJSON* o, const char* key) {
@@ -143,7 +177,7 @@ std::string JStr(const std::string& body, const char* key) {
 // ── 配對（跟電視同一套；kind＝esp32）────────────────────────────────────────
 void PairTask(void*) {
     std::string body = std::string("{\"name\":\"") + YTMATE_DEVICE_NAME + "\",\"kind\":\"esp32\"}";
-    Resp r = Request("POST", "/api/tv/pair/start", body, false);
+    Resp r = Request(nullptr, "POST", "/api/tv/pair/start", body, false);
     if (r.status != 200) {
         Say("沒辦法連到 YTmate 伺服器，請確認 Wi-Fi 後再長按 BOOT");
         pairing = false;
@@ -155,7 +189,7 @@ void PairTask(void*) {
     Application::GetInstance().PlaySound(Lang::Sounds::OGG_POPUP);
     for (int i = 0; i < 200; ++i) {
         vTaskDelay(pdMS_TO_TICKS(3000));
-        Resp p = Request("POST", "/api/tv/pair/poll", "{\"pair_id\":\"" + pid + "\",\"poll_secret\":\"" + ps + "\"}", false);
+        Resp p = Request(nullptr, "POST", "/api/tv/pair/poll", "{\"pair_id\":\"" + pid + "\",\"poll_secret\":\"" + ps + "\"}", false);
         if (p.status != 200) continue;
         std::string st = JStr(p.body, "status");
         if (st == "approved") {
@@ -176,7 +210,7 @@ void PairTask(void*) {
 
 void StartPairing() {
     if (pairing.exchange(true)) return;
-    if (xTaskCreate(PairTask, "ytm_pair", 6 * 1024, nullptr, 3, nullptr) != pdPASS) pairing = false;
+    if (xTaskCreate(PairTask, "ytm_pair", 6 * 1024, nullptr, 1, nullptr) != pdPASS) pairing = false;
 }
 
 // ── 播放（都在 PlayerTask 裡執行）───────────────────────────────────────────
@@ -187,6 +221,11 @@ int CurPos() {
 }
 
 int Count() { std::lock_guard<std::mutex> lk(mu); return (int)items.size(); }
+
+// 小智正在對話（聽／說／連線中）
+bool InChat(DeviceState ds) {
+    return ds == kDeviceStateListening || ds == kDeviceStateSpeaking || ds == kDeviceStateConnecting;
+}
 
 bool WaitState(DeviceState want, int ms) {
     auto& app = Application::GetInstance();
@@ -217,6 +256,7 @@ void ShowNow() {
             s += "\n" + it.channel + (items.size() > 1 ? "　" + std::to_string(cur + 1) + "／" + std::to_string(items.size()) : "");
     }
     if (pstate == kPaused) s += "\n\n按一下 BOOT 繼續";
+    else if (pstate == kInterrupted && start_after_chat) s += "\n\n說完話就開始播";
     Say(s);
 }
 
@@ -233,11 +273,16 @@ bool PlayAt(int i, int pos) {
     pstate = kStarting;
     StopStream();
     auto& app = Application::GetInstance();
-    if (!WaitState(kDeviceStateIdle, 8000)) {          // 小智還在對話：先記著，對話結束再播
+    // v2.1：小智還在對話 → 不要乾等（以前等 8 秒，遙控／語音那邊等不到回報）；先記著，小智說完就結束對話開始播
+    if (InChat(app.GetDeviceState()) || !WaitState(kDeviceStateIdle, 3000)) {
         paused_pos = pos;
         pstate = kInterrupted;
+        user_paused = false;
+        start_after_chat = true;
+        ShowNow();
         return false;
     }
+    start_after_chat = false;
     WifiFast(true);
     offset_s = pos;
     last_ms = 0;
@@ -259,6 +304,7 @@ bool PlayAt(int i, int pos) {
 
 void Pause(bool by_user) {
     int s = pstate;
+    start_after_chat = false;
     if (s == kInterrupted) { pstate = kPaused; user_paused = by_user; ShowNow(); return; }
     if (s != kPlaying && s != kStarting) return;
     paused_pos = CurPos();
@@ -282,6 +328,7 @@ void StopAll() {
     }
     pstate = kStopped;
     paused_pos = 0;
+    start_after_chat = false;
     WifiFast(false);
     Status("");
     Say("⏹ 已停止播放");
@@ -376,7 +423,11 @@ bool LoadList(const std::string& body, std::string& msg) {
         items = std::move(list);
         cur = 0;
     }
-    if (!PlayAt(0, start_pos)) { msg = "跳跳正忙，對話結束後開始播"; return true; }
+    if (!PlayAt(0, start_pos)) {
+        if (pstate == kInterrupted) { msg = "好，跳跳說完這句話就開始播：" + first; return true; }
+        msg = "跳跳沒辦法開始播放，請稍後再試";
+        return false;
+    }
     msg = "跳跳開始播放：" + first + (start_pos > 0 ? "（從 " + Mmss(start_pos) + " 接著播）" : "");
     return true;
 }
@@ -448,7 +499,7 @@ void HandleCmd(const std::string& json) {
     }
     cJSON_Delete(c);
     if (!id.empty()) Ack(id, ok, msg);
-    ReportState();
+    if (!InChat(Application::GetInstance().GetDeviceState())) ReportState();
 }
 
 void Enqueue(const std::string& s) {
@@ -473,7 +524,7 @@ void PollTask(void*) {
             auth_problem = 0;           // 15 秒後再試（使用者可能已經重新配對）
             continue;
         }
-        Resp r = Request("GET", "/api/remote/poll?wait=20", "", true, 30000);
+        Resp r = Request(&poll_conn, "GET", "/api/remote/poll?wait=20", "", true, 30000);
         if (r.status != 200) {
             vTaskDelay(pdMS_TO_TICKS(backoff * 1000));
             backoff = backoff < 30 ? backoff * 2 : 30;
@@ -495,8 +546,8 @@ void PollTask(void*) {
 // 播放控制：處理指令與按鍵、播完接下一支、小智對話打斷後接著播、定時回報狀態
 void PlayerTask(void*) {
     auto& app = Application::GetInstance();
-    int64_t last_report = 0, last_resume = 0, last_status = 0, idle_since = 0;
-    bool reported_idle = false;
+    int64_t last_report = 0, last_resume = 0, last_status = 0, idle_since = 0, listen_since = 0;
+    bool reported_idle = false, ended_chat = false;
     while (true) {
         std::string* cmd = nullptr;
         if (xQueueReceive(cmd_q, &cmd, pdMS_TO_TICKS(250)) == pdTRUE && cmd) {
@@ -542,8 +593,19 @@ void PlayerTask(void*) {
         if (pstate == kInterrupted) {
             if (ds == kDeviceStateIdle) {
                 if (!idle_since) idle_since = now;
-                if (now - idle_since > 1500000 && !user_paused) { Resume(); ReportState(); last_report = now; }
+                int64_t wait_us = start_after_chat ? 500000 : 1500000;
+                if (now - idle_since > wait_us && !user_paused) { Resume(); ReportState(); last_report = now; }
             } else idle_since = 0;
+            // v2.1：對話中要求播放 → 小智說完（回到「聆聽」而且你沒在說話）就結束對話，馬上開始播
+            if (start_after_chat && !user_paused && ds == kDeviceStateListening && !app.IsVoiceDetected()) {
+                if (!listen_since) listen_since = now;
+                if (now - listen_since > 800000 && !ended_chat) {
+                    ESP_LOGI(TAG, "要求播放：結束這次對話");
+                    app.YtmateEndChat();
+                    ended_chat = true;
+                }
+            } else listen_since = 0;
+            if (ds != kDeviceStateListening) ended_chat = false;
         }
         if (pstate == kPlaying && now - last_status > 3000000) {
             last_status = now;
@@ -553,7 +615,8 @@ void PlayerTask(void*) {
         }
         if (pstate == kPlaying && now - last_resume > 15000000) { last_resume = now; ReportResume(false); }
         bool active = pstate != kStopped;
-        if (WifiUp() && !Token().empty() && (now - last_report > (active ? 10000000 : 60000000) || (!active && !reported_idle))) {
+        if (InChat(ds)) continue;            // v2.1：小智對話中不做非必要的連線（不跟語音辨識搶 CPU）
+        if (WifiUp() && !Token().empty() && (now - last_report > (active ? 15000000 : 60000000) || (!active && !reported_idle))) {
             last_report = now;
             reported_idle = !active;
             ReportState();
@@ -604,13 +667,15 @@ std::string StatusText() {
     std::lock_guard<std::mutex> lk(mu);
     if (s == kStopped || items.empty()) return Token().empty() ? "還沒配對 YTmate（長按 BOOT 配對）" : "待命，沒有在播放";
     std::string t = items[cur].title + "（第 " + std::to_string(cur + 1) + "／" + std::to_string(items.size()) + " 支）";
-    return (s == kPlaying ? "正在播：" : "暫停中：") + t;
+    if (s == kInterrupted && !user_paused) return "對話結束就接著播：" + t;
+    return (s == kPlaying || s == kStarting ? "正在播：" : "暫停中：") + t;
 }
 
 void Init() {
     cmd_q = xQueueCreate(8, sizeof(void*));
-    xTaskCreate(PollTask, "ytm_poll", 6 * 1024, nullptr, 2, nullptr);
-    xTaskCreate(PlayerTask, "ytm_play", 8 * 1024, nullptr, 3, nullptr);
+    // v2.1：優先權 1（比小智的 Opus 編碼工作 2 低）：TLS 連線很吃 CPU，不能擠到語音
+    xTaskCreate(PollTask, "ytm_poll", 6 * 1024, nullptr, 1, nullptr);
+    xTaskCreate(PlayerTask, "ytm_play", 8 * 1024, nullptr, 1, nullptr);
     auto& mcp = McpServer::GetInstance();
     mcp.AddTool("self.ytmate.player_status",
         "查詢跳跳現在在播 YTmate 的什麼（片名、第幾支、是否暫停）。",
@@ -620,6 +685,7 @@ void Init() {
         PropertyList(), [](const PropertyList&) -> ToolResult {
             if (pstate == kStopped) return ReturnValue(std::string("目前沒有在播放"));
             user_paused = true;
+            start_after_chat = false;
             if (pstate == kInterrupted) pstate = kPaused;
             return ReturnValue(std::string("好，已暫停；要繼續時按一下 BOOT"));
         });
@@ -635,7 +701,17 @@ void Init() {
             paused_pos = 0;                          // 對話結束後從下一支開頭接著播
             pstate = kInterrupted;
             user_paused = false;
-            return ReturnValue(std::string("好，對話結束後播下一支"));
+            start_after_chat = true;                 // v2.1：說完就結束對話開始播
+            return ReturnValue(std::string("好，說完這句就播下一支"));
+        });
+    mcp.AddTool("self.ytmate.resume",
+        "繼續播放跳跳暫停中的 YTmate 節目（使用者說「繼續播放」「繼續」「接著放」「開始播」時呼叫；不是下一支）。",
+        PropertyList(), [](const PropertyList&) -> ToolResult {
+            if (pstate == kStopped || Count() == 0) return ReturnValue(std::string("目前沒有可以繼續的節目，請用 tv_play 指定要在跳跳播什麼"));
+            if (pstate == kPaused) pstate = kInterrupted;
+            user_paused = false;
+            start_after_chat = true;
+            return ReturnValue(std::string("好，說完這句就接著播"));
         });
     ESP_LOGI(TAG, "YTmate 播放功能已啟用（伺服器 %s）", YTMATE_SERVER_URL);
 }
