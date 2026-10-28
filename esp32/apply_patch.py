@@ -7,7 +7,8 @@ v2（2026-10-28）：錄音功能移除，改成「頻道播放」——用小�
 不再修改音訊服務（v1 的錄音資料流整段拿掉），只加：
   - Application 的公開方法（播放網址、停止、目前播放編號、結束對話〔v2.1〕）＋播放進度／播完通知給 YTmate；
   - BOOT 單擊（暫停／繼續）、雙擊（下一支）、長按（停止／配對）；
-  - 不自動安裝官方韌體。"""
+  - 不自動安裝官方韌體；
+  - 通知播放器的網路等待時間 5 → 15 秒（v2.3）。"""
 import os
 import shutil
 import sys
@@ -71,6 +72,12 @@ patch("main/application.cc", [
      "    if (ytmate::IsBusy()) {\n"
      "        return false;  // YTmate：正在開始播放\n"
      "    }\n"),
+])
+
+# 2b) v2.3：通知播放器等待網路資料的時間 5 → 15 秒（只先存約 3 秒的聲音，Wi-Fi／Cloudflare 停頓超過 5 秒就整首失敗）
+patch("main/notify/notify_player.cc", [
+    ("constexpr int kHttpTimeoutMs = 5000;",
+     "constexpr int kHttpTimeoutMs = 15000;  // YTmate v2.3：原本 5000，網路停頓一下就整首失敗"),
 ])
 
 # 3) 編譯：加入 YTmate 原始碼；伺服器網址可用環境變數 YTMATE_SERVER_URL 覆寫

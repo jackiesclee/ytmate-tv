@@ -31,7 +31,7 @@
 #ifndef YTMATE_DEVICE_NAME
 #define YTMATE_DEVICE_NAME "跳跳"
 #endif
-#define YTMATE_FW_VERSION "跳跳 2.2"
+#define YTMATE_FW_VERSION "跳跳 2.3"
 
 #define TAG "YTmate"
 
@@ -573,6 +573,7 @@ void PlayerTask(void*) {
     auto& app = Application::GetInstance();
     int64_t last_report = 0, last_resume = 0, last_status = 0, idle_since = 0, listen_since = 0;
     bool reported_idle = false, ended_chat = false;
+    int retry_n = 0, retry_idx = -1;          // v2.3：串流中斷重連次數（同一支）
     while (true) {
         std::string* cmd = nullptr;
         if (xQueueReceive(cmd_q, &cmd, pdMS_TO_TICKS(250)) == pdTRUE && cmd) {
@@ -586,6 +587,7 @@ void PlayerTask(void*) {
         // 播完一支 → 下一支；整份清單播完 → 拿待播清單
         if (finished.exchange(false)) {
             if (finished_ok) {
+                retry_n = 0;
                 ReportResume(true);
                 if (cur + 1 < Count()) PlayAt(cur + 1, 0);
                 else {
@@ -600,8 +602,20 @@ void PlayerTask(void*) {
                     }
                 }
             } else {
-                Say("⚠️ 這支播放失敗，跳到下一支");
-                if (cur + 1 < Count()) PlayAt(cur + 1, 0); else StopAll();
+                // v2.3：網路停頓太久、串流斷掉 → 不要跳下一首，從斷掉的位置（往前 2 秒）重新接上，最多 3 次
+                int at = offset_s + (int)(last_ms / 1000);
+                if (cur != retry_idx) { retry_idx = cur; retry_n = 0; }
+                if (retry_n < 3) {
+                    ++retry_n;
+                    ESP_LOGW(TAG, "串流中斷，第 %d 次重新連線（從 %d 秒）", retry_n, at);
+                    Status("⏳ 網路不穩，重新連線…");
+                    vTaskDelay(pdMS_TO_TICKS(1000 * retry_n));
+                    PlayAt(cur, at > 2 ? at - 2 : 0);
+                } else {
+                    retry_n = 0;
+                    Say("⚠️ 這支一直連不上，跳到下一支");
+                    if (cur + 1 < Count()) PlayAt(cur + 1, 0); else StopAll();
+                }
             }
             ReportState();
             last_report = now;
