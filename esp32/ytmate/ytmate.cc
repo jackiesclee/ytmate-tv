@@ -9,6 +9,8 @@
 #include <vector>
 
 #include <cJSON.h>
+#include <esp_lvgl_port.h>
+#include <lvgl.h>
 #include <esp_log.h>
 #include <esp_timer.h>
 #include <esp_wifi.h>
@@ -29,7 +31,7 @@
 #ifndef YTMATE_DEVICE_NAME
 #define YTMATE_DEVICE_NAME "跳跳"
 #endif
-#define YTMATE_FW_VERSION "跳跳 2.1"
+#define YTMATE_FW_VERSION "跳跳 2.2"
 
 #define TAG "YTmate"
 
@@ -57,6 +59,8 @@ QueueHandle_t cmd_q = nullptr;           // 遙控指令（std::string* JSON）�
 std::atomic<bool> pairing{false};
 std::atomic<int> auth_problem{0};        // 401／403：配對失效或身分不對
 std::atomic<bool> start_after_chat{false};  // v2.1：在對話中要求播放（遙控或語音）→ 小智說完就結束對話、開始播
+std::atomic<bool> auto_end_chat{false};     // v2.2：播放被打斷（點螢幕／你好小智）→ 小智回答完、你一陣子沒說話就結束對話接著播
+std::atomic<bool> saw_speaking{false};      // v2.2：這次打斷後小智已經回答過
 
 // ── 小工具 ───────────────────────────────────────────────────────────────
 std::string Token() { Settings s("ytmate", false); return s.GetString("token"); }
@@ -256,6 +260,7 @@ void ShowNow() {
             s += "\n" + it.channel + (items.size() > 1 ? "　" + std::to_string(cur + 1) + "／" + std::to_string(items.size()) : "");
     }
     if (pstate == kPaused) s += "\n\n按一下 BOOT 繼續";
+    else if (pstate == kPlaying) s += "\n\n點一下螢幕跟小智說話";
     else if (pstate == kInterrupted && start_after_chat) s += "\n\n說完話就開始播";
     Say(s);
 }
@@ -283,6 +288,7 @@ bool PlayAt(int i, int pos) {
         return false;
     }
     start_after_chat = false;
+    auto_end_chat = false;
     WifiFast(true);
     offset_s = pos;
     last_ms = 0;
@@ -305,6 +311,7 @@ bool PlayAt(int i, int pos) {
 void Pause(bool by_user) {
     int s = pstate;
     start_after_chat = false;
+    auto_end_chat = false;
     if (s == kInterrupted) { pstate = kPaused; user_paused = by_user; ShowNow(); return; }
     if (s != kPlaying && s != kStarting) return;
     paused_pos = CurPos();
@@ -438,6 +445,24 @@ void Next() {
 
 void HandleCmd(const std::string& json) {
     // 按鍵（本機）
+    if (json == "key:talk") {                // v2.2：點一下螢幕＝暫停＋直接開始跟小智說話
+        auto& app = Application::GetInstance();
+        int s = pstate;
+        if (s == kPlaying || s == kStarting) {
+            paused_pos = CurPos();
+            pstate = kInterrupted;
+            our_id = 0;                       // 停掉串流時不要當成「播完」
+            user_paused = false;
+            start_after_chat = false;
+            auto_end_chat = true;
+            saw_speaking = false;
+            ESP_LOGI(TAG, "點螢幕：暫停在 %d 秒，開始對話", (int)paused_pos);
+            app.ToggleChatState();            // 播放中＝停止播放並開始聆聽（小智原本的流程）
+        } else if (app.GetDeviceState() == kDeviceStateIdle) {
+            app.ToggleChatState();            // 暫停中／等待中：直接開始說話（說完維持原本的狀態）
+        }
+        return;
+    }
     if (json == "key:toggle") { if (pstate == kPlaying || pstate == kStarting) Pause(true); else Resume(); ReportState(); return; }
     if (json == "key:next") { if (cur + 1 < Count()) Next(); else Say("已經是最後一支"); ReportState(); return; }
     if (json == "key:stop") { ReportResume(false); StopAll(); ReportState(); return; }
@@ -588,6 +613,8 @@ void PlayerTask(void*) {
             pstate = kInterrupted;
             our_id = 0;
             idle_since = 0;
+            auto_end_chat = true;
+            saw_speaking = false;
             ESP_LOGI(TAG, "播放被打斷（狀態 %d），停在 %d 秒", (int)ds, (int)paused_pos);
         }
         if (pstate == kInterrupted) {
@@ -597,10 +624,13 @@ void PlayerTask(void*) {
                 if (now - idle_since > wait_us && !user_paused) { Resume(); ReportState(); last_report = now; }
             } else idle_since = 0;
             // v2.1：對話中要求播放 → 小智說完（回到「聆聽」而且你沒在說話）就結束對話，馬上開始播
-            if (start_after_chat && !user_paused && ds == kDeviceStateListening && !app.IsVoiceDetected()) {
+            // v2.2：被打斷（點螢幕／你好小智）→ 小智回答完、你 4 秒沒說話（一直沒開口就 10 秒）就結束對話、接著播
+            if (ds == kDeviceStateSpeaking) saw_speaking = true;
+            int64_t end_after = start_after_chat ? 800000 : auto_end_chat ? (saw_speaking ? 4000000 : 10000000) : 0;
+            if (end_after && !user_paused && ds == kDeviceStateListening && !app.IsVoiceDetected()) {
                 if (!listen_since) listen_since = now;
-                if (now - listen_since > 800000 && !ended_chat) {
-                    ESP_LOGI(TAG, "要求播放：結束這次對話");
+                if (now - listen_since > end_after && !ended_chat) {
+                    ESP_LOGI(TAG, "結束這次對話、接著播");
                     app.YtmateEndChat();
                     ended_chat = true;
                 }
@@ -671,8 +701,23 @@ std::string StatusText() {
     return (s == kPlaying || s == kStarting ? "正在播：" : "暫停中：") + t;
 }
 
+// v2.2：觸控螢幕「點一下」（不是滑動、不是長按）。在 LVGL 的工作裡被呼叫，只丟進指令佇列。
+static void OnTouchTap(lv_event_t*) {
+    if (pstate == kStopped) return;           // 沒有播放清單時不攔截（照原本小智的行為）
+    Enqueue("key:talk");
+}
+
 void Init() {
     cmd_q = xQueueCreate(8, sizeof(void*));
+    if (lvgl_port_lock(1000)) {
+        for (lv_indev_t* in = lv_indev_get_next(nullptr); in; in = lv_indev_get_next(in)) {
+            if (lv_indev_get_type(in) == LV_INDEV_TYPE_POINTER) {
+                lv_indev_add_event_cb(in, OnTouchTap, LV_EVENT_SHORT_CLICKED, nullptr);
+                ESP_LOGI(TAG, "觸控：點一下螢幕＝暫停並開始對話");
+            }
+        }
+        lvgl_port_unlock();
+    }
     // v2.1：優先權 1（比小智的 Opus 編碼工作 2 低）：TLS 連線很吃 CPU，不能擠到語音
     xTaskCreate(PollTask, "ytm_poll", 6 * 1024, nullptr, 1, nullptr);
     xTaskCreate(PlayerTask, "ytm_play", 8 * 1024, nullptr, 1, nullptr);
