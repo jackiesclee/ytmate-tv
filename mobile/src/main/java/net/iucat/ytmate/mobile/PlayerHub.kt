@@ -5,6 +5,7 @@ import android.content.Context
 import android.net.Uri
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.util.Log
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
@@ -21,6 +22,7 @@ import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.session.MediaController
 import androidx.media3.session.SessionToken
 import com.google.common.util.concurrent.ListenableFuture
+import org.json.JSONArray
 import org.json.JSONObject
 import java.util.concurrent.Executors
 
@@ -69,7 +71,28 @@ object PlayerHub {
             .setSeekBackIncrementMs(10000).setSeekForwardIncrementMs(30000)
             .build()
         p.addListener(object : Player.Listener {
+            // 2026-10-30：🩺 播放狀況回報——開始等待、播到一半緩衝、跳轉等待、錯誤
+            override fun onPlaybackStateChanged(state: Int) {
+                val now = SystemClock.uptimeMillis()
+                if (state == Player.STATE_BUFFERING && pbReady) {
+                    if (now - pbLastSeek < 3000) { if (pbSeekAt == 0L) pbSeekAt = pbLastSeek }
+                    else if (p.playWhenReady && pbStallAt == 0L && pbSeekAt == 0L) pbStallAt = now
+                } else if (state == Player.STATE_READY) {
+                    when {
+                        pbStartAt > 0 && p.playWhenReady -> { pbEvent(p, "start", now - pbStartAt); pbStartAt = 0L }
+                        pbSeekAt > 0 -> pbEvent(p, "seek", now - pbSeekAt)
+                        pbStallAt > 0 && now - pbStallAt >= 300 -> pbEvent(p, "stall", now - pbStallAt)
+                    }
+                    pbSeekAt = 0L; pbStallAt = 0L; pbReady = true
+                }
+            }
+
+            override fun onPositionDiscontinuity(oldPosition: Player.PositionInfo, newPosition: Player.PositionInfo, reason: Int) {
+                if (reason == Player.DISCONTINUITY_REASON_SEEK || reason == Player.DISCONTINUITY_REASON_SEEK_ADJUSTMENT) pbLastSeek = SystemClock.uptimeMillis()
+            }
+
             override fun onPlayerError(error: PlaybackException) {
+                pbEvent(p, "error", 0, error.errorCodeName); pbFlush()
                 val i = p.currentMediaItemIndex
                 if (i in items.indices && srcIdx[i] < items[i].sources.size - 1) {     // 換下一個版本
                     srcIdx[i]++
@@ -83,13 +106,14 @@ object PlayerHub {
             }
 
             override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+                pbStartAt = SystemClock.uptimeMillis(); pbReady = false; pbStallAt = 0L; pbSeekAt = 0L
                 val prev = lastIdx
                 if (prev in items.indices && reason == Player.MEDIA_ITEM_TRANSITION_REASON_AUTO) report(prev, items[prev].durMs, true)
                 lastIdx = p.currentMediaItemIndex
             }
 
             override fun onIsPlayingChanged(isPlaying: Boolean) {
-                if (!isPlaying) reportNow()
+                if (!isPlaying) { reportNow(); pbFlush() }
             }
         })
         applyTrackPrefs(p)
@@ -100,6 +124,46 @@ object PlayerHub {
     }
 
     private var lastIdx = -1
+
+    // ══ 🩺 播放狀況回報（2026-10-30）→ 伺服器 /api/playback/report；送不出去就丟掉，不影響播放 ══
+    private val pbQ = ArrayList<JSONObject>()
+    private var pbStartAt = 0L
+    private var pbSeekAt = 0L
+    private var pbStallAt = 0L
+    private var pbLastSeek = 0L
+    private var pbReady = false
+    @Volatile private var pbLastFlush = 0L
+
+    private fun pbEvent(p: Player, kind: String, waitMs: Long, err: String = "") {
+        val i = p.currentMediaItemIndex
+        val it = items.getOrNull(i) ?: return
+        val src = it.sources.getOrNull(srcIdx.getOrElse(i) { 0 })
+        val url = src?.url ?: ""
+        val q = when {
+            src?.kind == "audio" -> "audio"
+            url.contains(".low.") -> "low"
+            url.contains(".burn.") -> "burn"
+            else -> "orig"
+        }
+        val o = JSONObject().put("kind", kind).put("wait_ms", waitMs).put("video_id", it.vid).put("quality", q)
+            .put("pos", p.currentPosition.coerceAtLeast(0L) / 1000.0)
+            .put("buffered", (p.bufferedPosition - p.currentPosition).coerceAtLeast(0L) / 1000.0)
+        if (err.isNotEmpty()) o.put("error", err)
+        synchronized(pbQ) { pbQ.add(o); if (pbQ.size > 200) pbQ.removeAt(0) }
+    }
+
+    private fun pbFlush() {
+        val arr: JSONArray
+        synchronized(pbQ) {
+            if (pbQ.isEmpty()) return
+            arr = JSONArray(pbQ); pbQ.clear()
+        }
+        pbLastFlush = System.currentTimeMillis()
+        io.execute {
+            try { Api.json("POST", "/api/playback/report", JSONObject().put("events", arr).put("platform", "phone")) }
+            catch (e: Exception) { Log.w(TAG, "播放狀況回報失敗：$e") }
+        }
+    }
 
     /** 確保背景播放服務在跑（通知列、鎖定畫面控制）。 */
     fun connectService(ctx: Context) {
@@ -218,6 +282,7 @@ object PlayerHub {
         override fun run() {
             val p = player
             if (p != null && p.isPlaying) reportNow()
+            if (System.currentTimeMillis() - pbLastFlush > 15_000) pbFlush()
             if (sleepAt > 0 && System.currentTimeMillis() >= sleepAt) { sleepAt = 0; p?.pause() }
             ui.postDelayed(this, 10000)
         }

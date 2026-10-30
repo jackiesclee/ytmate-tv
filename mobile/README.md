@@ -25,6 +25,9 @@ Android 7.0 以上。介面是伺服器上的手機版頁面 `/m`（WebView，�
 - **📥 稍後看**：貼連結，或在其他 App 按「分享 → YTmate」（YouTube、B 站、CNN、X）→ 下載到「📥 稍後看」頻道。
 - **平板**：版面自動變寬（頻道一排 3～4 個、影片清單兩欄）。
 
+## 🩺 回報播放卡頓（2026-10-30）
+- 原生播放器自動記錄開始播放等待、播到一半緩衝、跳轉等待、錯誤，送到伺服器 `/api/playback/report`；在 YTmate「🩺 播放狀況」頁看各裝置的卡頓與伺服器狀態。手機瀏覽器版的網頁播放器也會回報。
+
 ## 檔案
 - `MainActivity.kt`：WebView、密碼登記與自動登入、JS 橋接（window.YTmateApp）、分享連結。
 - `PlayerHub.kt`／`PlaybackService.kt`／`PlayerActivity.kt`：播放核心、背景播放服務、播放畫面。

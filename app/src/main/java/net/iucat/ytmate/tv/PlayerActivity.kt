@@ -370,6 +370,7 @@ class PlayerActivity : Activity() {
                     view.controllerShowTimeoutMs = HIDE_MS
                     view.showController()                    // 播放中 → 重新排定 3.5 秒後收起
                 }
+                pbStartAt = SystemClock.uptimeMillis(); pbSeekAt = 0L      // 🩺 換到這一支：從現在開始算等待時間
                 Remote.reportNow()
             }
 
@@ -379,6 +380,12 @@ class PlayerActivity : Activity() {
 
             override fun onPlaybackStateChanged(state: Int) {
                 updateKeepScreenOn()
+                val pbNow = SystemClock.uptimeMillis()        // 🩺 開始播放／跳轉等待時間
+                if (state == Player.STATE_BUFFERING && wasReady && pbNow - lastSeekAt < 3000 && pbSeekAt == 0L) pbSeekAt = lastSeekAt
+                if (state == Player.STATE_READY) {
+                    if (pbStartAt > 0 && player.playWhenReady) { pbEvent("start", pbNow - pbStartAt); pbStartAt = 0L }
+                    else if (pbSeekAt > 0) { pbEvent("seek", pbNow - pbSeekAt); pbSeekAt = 0L }
+                }
                 trackStall(state)
                 if (state == Player.STATE_READY) {
                     val i = player.currentMediaItemIndex
@@ -390,6 +397,7 @@ class PlayerActivity : Activity() {
             override fun onPlayerError(error: PlaybackException) {
                 val i = player.currentMediaItemIndex
                 Log.w(TAG, "error item=$i src=${srcIdx.getOrNull(i)} ${error.errorCodeName}")
+                pbEvent("error", 0, error.errorCodeName); PbReport.flush()
                 // 網路斷線／逾時：同一支、同一個時間點重新連線（不換版本、不跳過）
                 if (i in items.indices && isNetworkError(error.errorCode) && netRetry[i] < NET_RETRIES) {
                     netRetry[i]++
@@ -1185,6 +1193,28 @@ class PlayerActivity : Activity() {
     private var prefetchDiagAt = 0L
     private var stallStartLast = 0L
     private var lastSeekAt = 0L                      // 自己快轉／跳轉造成的緩衝不算卡頓
+    // 2026-10-30：🩺 播放狀況回報（PbReport）
+    private var pbStartAt = 0L                       // 開始載入這一支的時間（等到可以播放＝開始等待時間）
+    private var pbSeekAt = 0L                        // 快轉／跳轉後緩衝：從跳轉那一刻算到可以播放
+    private val pbTick = object : Runnable { override fun run() { PbReport.tick(); ui.postDelayed(this, 15_000) } }
+
+    private fun pbEvent(kind: String, waitMs: Long, err: String = "") {
+        val i = player.currentMediaItemIndex
+        val it = items.getOrNull(i) ?: return
+        val src = if (listening(i)) audioSrc(i) else it.sources.getOrNull(srcIdx.getOrElse(i) { 0 })
+        val url = src?.url ?: ""
+        val q = when {
+            src?.kind == "audio" -> "audio"
+            url.contains(".low.") -> "low"
+            url.contains(".burn.") -> "burn"
+            else -> "orig"
+        }
+        val o = JSONObject().put("kind", kind).put("wait_ms", waitMs).put("video_id", it.vid).put("quality", q)
+            .put("pos", player.currentPosition.coerceAtLeast(0L) / 1000.0)
+            .put("buffered", (player.bufferedPosition - player.currentPosition).coerceAtLeast(0L) / 1000.0)
+        if (err.isNotEmpty()) o.put("error", err)
+        PbReport.add(o)
+    }
 
     /** 播放中變成「緩衝中」＝卡頓：記次數與時間；一卡頓就先停掉預先下載（把頻寬讓給目前這支）。 */
     private fun trackStall(state: Int) {
@@ -1194,6 +1224,7 @@ class PlayerActivity : Activity() {
                 val d = now - stallStart
                 stallMs += d
                 Log.i(TAG, "stall end item=${player.currentMediaItemIndex} ms=$d total=$stalls/${stallMs}ms")
+                pbEvent("stall", d)
                 stallStart = 0L
             }
             wasReady = true
@@ -1666,12 +1697,16 @@ class PlayerActivity : Activity() {
 
     override fun onStart() {
         super.onStart()
+        ui.removeCallbacks(pbTick); ui.postDelayed(pbTick, 15_000)
+        if (::player.isInitialized && pbStartAt == 0L && player.playbackState != Player.STATE_READY) pbStartAt = SystemClock.uptimeMillis()
         Remote.attachPlayer(this)
         Remote.onStart(this)
     }
 
     override fun onStop() {
         super.onStop()
+        ui.removeCallbacks(pbTick)
+        PbReport.flush()
         if (::player.isInitialized) {
             saveCurrent()
             player.pause()     // 按首頁鍵離開時暫停（回來可以繼續）
